@@ -340,6 +340,30 @@ def test_editor_flow():
         G._editor_create = old_create
 
 
+def test_calendar_merge():
+    print("日历合并已排课表")
+    old_opt, old_api, old_dn = G.api_opt, G.api, G._dn
+    try:
+        def fake_opt(s, path, **kw):
+            if "workoutScheduleByPeriod" in path:
+                return [{"workoutScheduleId": 9, "calendarDate": "2026-11-10",
+                         "workout": {"workoutName": "800米间歇"}}]
+            if "calendar-service/year" in path:
+                return {"numOfDaysInMonth": 30, "calendarItems": []}
+            return None
+
+        G.api_opt = fake_opt
+        G.api = lambda *a, **k: {"activityList": []}
+        G._dn = lambda s: "guid"
+        out = G.t_get_calendar(G.Session(site="cn"), "2026-11")
+        events = out.get("事件") or []
+        check("课表出现在日历事件里", any(e.get("类型") == "训练" for e in events), events)
+        check("带日期与标题", events and events[0].get("日期") == "2026-11-10"
+              and events[0].get("标题") == "800米间歇", events)
+    finally:
+        G.api_opt, G.api, G._dn = old_opt, old_api, old_dn
+
+
 def test_write_gate():
     print("写操作开关")
     import os as _os
@@ -590,7 +614,7 @@ if __name__ == "__main__":
     for fn in (test_pace, test_sport, test_period, test_cookie_parse,
                test_csrf, test_session, test_compact, test_picker,
                test_weight_date, test_download, test_workout_builder,
-               test_editor_roundtrip, test_editor_flow, test_write_gate, test_session_permissions,
+               test_editor_roundtrip, test_editor_flow, test_calendar_merge, test_write_gate, test_session_permissions,
                test_bootstrap_fallback, test_refresh_lock, test_temperature,
                test_pr_sport, test_http_status_mapping, test_probe_result,
                test_rows_truncated, test_login_budget,

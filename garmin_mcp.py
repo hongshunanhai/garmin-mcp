@@ -2288,21 +2288,20 @@ def _start_editor(payload: dict) -> tuple[ThreadingHTTPServer, _EditorState, str
             except Exception:
                 body = {}
             try:
+                # 注意：页面上的按钮 = 用户亲手确认，不再要求 GARMIN_ALLOW_WRITE；
+                # 那个开关只约束「AI 直接写」（confirm=true 的路径）。
                 if self.path.startswith(f"{prefix}/api/create"):
-                    _require_write()
                     res = _editor_create(None, body)
                     state.phase, state.workout_id = "created", res["workout_id"]
                     self._send(200, "application/json", _editor_json(state, **res))
                 elif self.path.startswith(f"{prefix}/api/schedule"):
-                    _require_write()
                     wid, day = body.get("workout_id"), body.get("day")
                     s = ensure_session(interactive=False)
                     _check(s, _request(s, "POST", f"/gc-api/workout-service/schedule/{wid}",
-                                       body=json.dumps({"calendarDate": day}).encode(),
+                                       body=json.dumps({"date": day, "calendarDate": day}).encode(),
                                        headers={"Content-Type": "application/json"}), "排期")
                     self._send(200, "application/json", _editor_json(state, ok=True))
                 elif self.path.startswith(f"{prefix}/api/push"):
-                    _require_write()
                     s = ensure_session(interactive=False)
                     _check(s, _request(s, "PUT", "/gc-api/workout-service/schedule/sendtodevices",
                                        body=b"", headers={"Content-Type": "application/json"}), "发送")
@@ -2416,7 +2415,7 @@ def t_schedule_workout(s: Session, workout_id: str, day: str, confirm: bool = Fa
     if not confirm:
         return {"dry_run": True, "说明": f"将把课表 {workout_id} 排到 {day}；确认后加 confirm=true"}
     _require_write()
-    body = json.dumps({"calendarDate": day}).encode()
+    body = json.dumps({"date": day, "calendarDate": day}).encode()
     r = _check(s, _request(s, "POST", f"/gc-api/workout-service/schedule/{workout_id}",
                            body=body, headers={"Content-Type": "application/json"}), "排期")
     return {"ok": True, "workout_id": workout_id, "日期": day,
@@ -2468,7 +2467,18 @@ def t_get_calendar(s: Session, month: str | None = None) -> dict:
         })
         b["距离_km"] = round(b["距离_km"] + float(a.get("distance") or 0) / 1000.0, 2)
 
+    # 已排期的课表不在 calendarItems 里，单独查一次
+    sched = api_opt(s, "/gc-api/workout-service/schedule/workoutScheduleByPeriod",
+                    startDate=first.isoformat(), endDate=last.isoformat()) or []
     events = []
+    for sc in (sched if isinstance(sched, list) else []):
+        w = (sc.get("workout") or {})
+        events.append(compact({
+            "日期": sc.get("calendarDate") or sc.get("date"),
+            "类型": "训练",
+            "标题": w.get("workoutName"),
+            "id": sc.get("workoutScheduleId"),
+        }))
     for it in (cal.get("calendarItems") or []):
         kind = it.get("itemType")
         events.append(compact({

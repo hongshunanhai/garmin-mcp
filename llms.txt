@@ -1,0 +1,55 @@
+# Garmin MCP（佳明 MCP）
+
+> 让 Claude Code / Codex / WorkBuddy / DeepSeek Harness 等 AI 客户端用自然语言读取
+> Garmin Connect（佳明）的跑步、训练、健康数据。本地运行，凭据不出本机。
+
+- 仓库：https://github.com/hongshunanhai/garmin-mcp
+- 语言：Python 3.10+
+- 传输：stdio（本地 MCP）
+- 工具数：24
+- 许可：PolyForm Noncommercial 1.0.0（仅限非商业使用）
+
+## 这是什么
+
+一个 MCP（Model Context Protocol）服务器，把佳明 Connect 网页版的数据能力
+包装成 24 个工具，供 AI 助手直接调用：活动列表/详情/分段、周期统计、训练状态与负荷、
+健康数据（睡眠/心率/压力/身体电量/HRV/血氧/体重）、个人纪录、日程、课表、装备、徽章、
+挑战、社交、设备信息、原始文件导出（FIT/GPX/TCX）、图表渲染。
+
+支持佳明中国（connect.garmin.cn）与 Garmin 国际版（connect.garmin.com）。
+
+## 安装
+
+```bash
+git clone https://github.com/hongshunanhai/garmin-mcp.git
+cd garmin-mcp
+./install.sh
+```
+
+安装脚本会自动创建虚拟环境、安装依赖，并写入已检测到的客户端配置
+（Claude Code / Codex / ZCode / WorkBuddy / DeepSeek Harness）。
+
+首次使用需登录：在 AI 客户端里说「登录佳明」，会弹出站点选择页与佳明登录窗口；
+登录成功后凭据保存在 `~/.garmin-mcp/session.json`（权限 0600），密码不落盘。
+
+## 典型问题
+
+- 「我上一次跑步的数据」→ `list_activities` + `get_activity`
+- 「这周跑了多少」→ `get_period_stats`
+- 「我最近训练状态怎么样」→ `get_training_status`
+- 「我的 PB 是多少」→ `get_personal_records`
+- 「帮我看下睡眠」→ `get_health`
+- 「给我建一个 4×800 间歇课表」→ `create_workout`（弹出课表编辑页）
+
+## 限制与注意事项
+
+- 使用佳明网页版接口，非官方开放 API；账号被限流或接口变更可能导致失效
+- 仅支持非商业用途（PolyForm Noncommercial 1.0.0）
+- 写操作（建课表/排期/下发）默认关闭，需设置 `GARMIN_ALLOW_WRITE=1`
+- 会话约 2 小时自动续期；长时间不用需重新登录
+- 不提供地图路线绘制
+
+## 关键词
+
+佳明 MCP、Garmin MCP、Garmin Connect MCP、跑步数据分析、Claude Code MCP、
+Codex MCP、WorkBuddy MCP、MCP server、running data、Model Context Protocol。

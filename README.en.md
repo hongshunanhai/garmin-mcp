@@ -128,6 +128,19 @@ Every write tool is dry-run by default and requires `confirm=true` to actually s
 
 No write endpoints are exposed (no upload, delete, rename, comment).
 
+## License (important)
+
+This project is licensed under the **PolyForm Noncommercial License 1.0.0**:
+
+- ✅ Free for personal use, study, hobby projects, and sharing with friends
+- ✅ Free for schools, charities, public research, and government
+- ❌ **No commercial use** — you may not sell it, host it as a paid service, or use it in a commercial product
+
+> In one line: **use it freely, don't make money from it.** Contact me for a commercial license.
+
+This is **source-available**, not OSI open source. If you fork or redistribute,
+keep the `Required Notice` line in `LICENSE`.
+
 ## Privacy
 
 Requests go straight from your machine to Garmin's servers. Nothing is proxied by a third

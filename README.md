@@ -343,6 +343,29 @@ cd /opt/garmin-mcp && python3 -m venv .venv && ./.venv/bin/pip install -r requir
 建议用 systemd 常驻，并在前面加一层 HTTPS（Caddy / Nginx 反代，或 Cloudflare Tunnel）：
 大部分手机端 App 只接受 `https://` 的 MCP 地址。
 
+## 给 AI / 搜索引擎看的摘要
+
+仓库根目录有 [`llms.txt`](llms.txt)，用一段话说明了这个项目是什么、怎么装、能干什么，
+方便 AI 助手和搜索引擎直接引用。
+
+## 许可证（重要）
+
+本项目采用 **PolyForm Noncommercial License 1.0.0** —— 你可以：
+
+- ✅ 自己用、改、分享给朋友
+- ✅ 用于个人学习、业余爱好、跑步训练
+- ✅ 学校、慈善机构、公益组织、政府机构使用
+
+但**不可以**：
+
+- ❌ 拿去卖钱（收费安装、付费托管、卖服务）
+- ❌ 用在商业产品里（公司内部生产环境也算）
+
+> 一句话：**随便用，别赚钱。** 需要商用请联系我单独授权。
+
+注意：这不是 OSI 认可的开源协议，属于 **source-available（源码可用）**。
+如果你 Fork 或分发，需要保留 `LICENSE` 里的 `Required Notice` 一行。
+
 ## 隐私
 
 **数据的流向要说清楚：**

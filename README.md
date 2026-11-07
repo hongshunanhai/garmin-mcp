@@ -364,6 +364,15 @@ garmin-mcp/
 它会依次检查：shell 语法、是否有未提交的改动、跟踪文件里有没有 Cookie 或个人绝对路径、
 单元测试、MCP 握手。任何一项不过都会以非零码退出。
 
+**登录后逐工具自检**（推荐先跑这个）：
+
+```bash
+./.venv/bin/python scripts/live_check.py
+```
+
+输出一张表：每个工具的状态（✅ / ⚠️ 无数据 / ❌ 报错）、耗时和一句摘要；
+有 ❌ 时退出码为 1。也支持 `--json` / `--only get_profile,get_gear` / `--activity <id>`。
+
 单独跑某一项：
 
 ```bash

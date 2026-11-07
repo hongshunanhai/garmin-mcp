@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -66,6 +67,7 @@ SITES = {
 DEFAULT_SITE = os.environ.get("GARMIN_SITE", "cn").strip().lower()
 
 HOME = Path(os.environ.get("GARMIN_MCP_HOME", Path.home() / ".garmin-mcp"))
+_WRITE_LOCK = threading.RLock()
 
 # 远程（HTTP）模式下没有可交互的图形界面：不弹选站点页、不弹课表编辑器
 REMOTE = False
@@ -183,23 +185,25 @@ def save_session(s: Session) -> None:
         "refresh_expires": s.refresh_expires,
         "display_name": s.display_name,
     }, ensure_ascii=False, indent=1).encode("utf-8")
+    _WRITE_LOCK.acquire()
     try:
-        fd = os.open(SESSION, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    except PermissionError as e:
-        raise GarminError(
-            f"无法写入凭据目录 {HOME}（{e}）。"
-            "如果 MCP 进程被沙箱限制，请改在终端里执行一次："
-            "  ./.venv/bin/python garmin_mcp.py login"
-            "（终端不受限），之后 MCP 只读取即可。"
-            "也可以用环境变量 GARMIN_MCP_HOME 指到一个可写目录。") from e
-    try:
+        try:
+            fd = os.open(SESSION, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        except PermissionError as e:
+            raise GarminError(
+                f"无法写入凭据目录 {HOME}（{e}）。"
+                "如果 MCP 进程被沙箱限制，请改在终端里执行一次："
+                "  ./.venv/bin/python garmin_mcp.py login"
+                "（终端不受限），之后 MCP 只读取即可。"
+                "也可以用环境变量 GARMIN_MCP_HOME 指到一个可写目录。") from e
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-    finally:
         try:
             os.chmod(SESSION, 0o600)   # 已存在的旧文件可能更宽，再收紧一次
         except OSError:
             pass
+    finally:
+        _WRITE_LOCK.release()
 
 
 def clear_session() -> None:
@@ -212,6 +216,25 @@ def clear_session() -> None:
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
+class _SameHostRedirect(urllib.request.HTTPRedirectHandler):
+    """只跟随同域跳转。
+
+    urllib 默认会把原请求头（含 Cookie）带到新地址；跨域跳转时那就是把
+    GARMIN-SSO 之类的凭据泄露给第三方。这里对跨域跳转直接放弃跟随，
+    让 _check() 按 302 处理。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url).netloc.lower()
+        new = urllib.parse.urlsplit(newurl).netloc.lower()
+        if old != new:
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_SameHostRedirect)
+
+
 def _headers(s: Session, extra: dict | None = None) -> dict:
     h = {
         "Cookie": s.cookie_header(),
@@ -259,7 +282,7 @@ def _request(s: Session, method: str, path: str, *, params: dict | None = None,
             url += ("&" if "?" in url else "?") + urllib.parse.urlencode(clean, doseq=True)
     req = urllib.request.Request(url, data=body, method=method, headers=_headers(s, headers))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _OPENER.open(req, timeout=timeout) as r:
             data = r.read()
             return _Resp(r.status, data.decode("utf-8", "replace"),
                          r.headers.get_all("Set-Cookie") or [],
@@ -2234,6 +2257,12 @@ class _EditorState:
     done: threading.Event = field(default_factory=threading.Event)
 
 
+def _json_for_script(obj) -> str:
+    """把对象塞进 <script> 里：转义 < 与 &，防止名称里带 </script> 断出标签。"""
+    return (json.dumps(obj, ensure_ascii=False)
+            .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+
+
 def _editor_json(state: _EditorState, **extra) -> str:
     d = {"ok": state.phase != "error", "phase": state.phase,
          "workout_id": state.workout_id, "message": state.message}
@@ -2256,11 +2285,11 @@ def _editor_create(session: Session, body: dict) -> dict:
 
 def _start_editor(payload: dict) -> tuple[ThreadingHTTPServer, _EditorState, str]:
     state = _EditorState()
-    initial = json.dumps({
+    initial = _json_for_script({
         "name": payload.get("workoutName") or "训练课程",
         "description": payload.get("description"),
         "steps": _payload_to_steps(payload),
-    }, ensure_ascii=False)
+    })
 
     # 随机路径 token：编辑器是写操作入口，text/plain 简单请求可绕过 CORS preflight，
     # 必须靠不可猜测的路径 token 鉴权，防止本机其它进程/恶意网页直接写入
@@ -3362,10 +3391,13 @@ def build_server():
 # HTTP / 远程模式（手机、多端共用同一份会话）
 # ==========================================================================
 def _auth_ok(header: str | None, token: str) -> bool:
-    """Bearer token 校验；token 为空表示不鉴权（只允许本机监听）。"""
+    """Bearer token 校验（常数时间比较）；token 为空表示不鉴权（只允许本机监听）。"""
     if not token:
         return True
-    return (header or "").strip() == f"Bearer {token}"
+    # compare_digest 对非 ASCII str 会抛 TypeError，先编码成 bytes
+    a = (header or "").strip().encode("utf-8", "ignore")
+    b = f"Bearer {token}".encode("utf-8", "ignore")
+    return hmac.compare_digest(a, b)
 
 
 def build_http_app(server, token: str = ""):

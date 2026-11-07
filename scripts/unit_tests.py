@@ -397,6 +397,56 @@ def test_http_auth():
         G.REMOTE, G.READONLY = old_remote, old_readonly
 
 
+def test_security_helpers():
+    print("安全相关")
+    import tempfile
+    import urllib.parse
+    import urllib.request
+    from pathlib import Path as _P
+
+    # 跨域跳转必须拒绝跟随（否则 Cookie 会被带出去）
+    r = G._SameHostRedirect()
+    req = urllib.request.Request("https://connect.garmin.cn/app/home",
+                                 headers={"Cookie": "session=x"})
+    check("跨域跳转不跟随", r.redirect_request(
+        req, None, 302, "", {}, "https://evil.example.com/x") is None)
+    same = r.redirect_request(req, None, 302, "", {},
+                              "https://connect.garmin.cn/app/other")
+    check("同域跳转照常跟随", same is not None)
+
+    # <script> 注入
+    js = G._json_for_script({"n": "</script><img src=x onerror=alert(1)>"})
+    check("转义 </script>", "</script" not in js and "\\u003c" in js, js)
+
+    # 写凭据失败不能把锁吞掉（否则后续调用全部卡死）
+    old_home, old_session, old_open = G.HOME, G.SESSION, G.os.open
+    tmp = _P(tempfile.mkdtemp())
+    G.HOME, G.SESSION = tmp, tmp / "session.json"
+
+    def boom(*a, **k):
+        raise PermissionError("denied")
+
+    G.os.open = boom
+    try:
+        import threading as _th
+        done = []
+
+        def try_twice():
+            for _ in range(2):
+                try:
+                    G.save_session(G.Session(site="cn", cookies={"session": "x"}))
+                except G.GarminError:
+                    pass
+            done.append(True)
+
+        t = _th.Thread(target=try_twice)
+        t.start()
+        t.join(timeout=5)
+        check("写失败后锁不泄漏（不会卡死）", done == [True], done)
+    finally:
+        G.HOME, G.SESSION, G.os.open = old_home, old_session, old_open
+
+
 def test_write_gate():
     print("写操作开关")
     import os as _os
@@ -647,7 +697,8 @@ if __name__ == "__main__":
     for fn in (test_pace, test_sport, test_period, test_cookie_parse,
                test_csrf, test_session, test_compact, test_picker,
                test_weight_date, test_download, test_workout_builder,
-               test_editor_roundtrip, test_editor_flow, test_calendar_merge, test_http_auth, test_write_gate, test_session_permissions,
+               test_editor_roundtrip, test_editor_flow, test_calendar_merge, test_http_auth, test_security_helpers,
+               test_write_gate, test_session_permissions,
                test_bootstrap_fallback, test_refresh_lock, test_temperature,
                test_pr_sport, test_http_status_mapping, test_probe_result,
                test_rows_truncated, test_login_budget,

@@ -364,7 +364,7 @@ cd /opt/garmin-mcp && python3 -m venv .venv && ./.venv/bin/pip install -r requir
 | `~/.garmin-mcp/session.json` | 会话 Cookie + CSRF（权限 600） | 删除即退出登录 |
 | `~/.garmin-mcp/chrome-profile-cn/`、`chrome-profile-global/` | 登录用的独立 Chrome 配置目录 | 含该浏览器的缓存，不再需要可整个删除 |
 
-仓库里没有任何用户数据；`.gitignore` 已排除 `.venv/`、`session.json`、`charts/`、本地 bundle。
+仓库里没有任何用户数据；`.gitignore` 已排除 `.venv/`、`__pycache__/`、`.ruff_cache/`、`session.json`、本地 bundle。
 
 ---
 

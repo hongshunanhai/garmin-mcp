@@ -66,6 +66,10 @@ SITES = {
 DEFAULT_SITE = os.environ.get("GARMIN_SITE", "cn").strip().lower()
 
 HOME = Path(os.environ.get("GARMIN_MCP_HOME", Path.home() / ".garmin-mcp"))
+
+# 远程（HTTP）模式下没有可交互的图形界面：不弹选站点页、不弹课表编辑器
+REMOTE = False
+READONLY = False
 SESSION = HOME / "session.json"
 PROFILE_PREFIX = "chrome-profile"
 
@@ -721,6 +725,11 @@ def _prompt_site_cli() -> str:
 def do_login(site: str | None = None, timeout_sec: int = 300) -> int:
     """总预算 ≈ 选站点 120s + 登录 300s ≈ 420s，留出余量给客户端 600s 上限。"""
     """登录入口。site=None 时先弹「选择站点」页面（国区 / 国际版），再打开对应登录页。"""
+    if REMOTE:
+        raise GarminError(
+            "远程模式无法弹出登录窗口。请在本机（有浏览器的电脑）执行："
+            "  ./.venv/bin/python garmin_mcp.py login"
+            "然后把 ~/.garmin-mcp/session.json 复制到服务器同一路径。")
     picker = None
     if not site:
         picker = _pick_site()
@@ -1806,6 +1815,8 @@ TARGET_HR = {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone"
 
 
 def _require_write() -> None:
+    if READONLY:
+        raise GarminError("这是只读实例（--readonly），写操作已在服务端关闭")
     if os.environ.get("GARMIN_ALLOW_WRITE", "").strip() not in ("1", "true", "yes"):
         raise GarminError(
             "写操作未开启。本工具默认只读；要创建课表/排期/下发到设备，"
@@ -2354,6 +2365,11 @@ def open_workout_editor(name: str, steps: list, sport: str = "run",
                         timeout: float = 240.0) -> dict:
     """弹本地编辑器页面，用户在页面上确认/调整/创建。返回创建结果或预览。"""
     payload = build_workout(name, steps, sport, description)
+    if REMOTE:
+        return {"ok": False, "remote": True, "dry_run": True,
+                "message": "远程模式不弹编辑器；确认无误后请用 confirm=true 直接创建",
+                "课表": payload,
+                "预览": _workout_summary(payload)}
     httpd, state, url = _start_editor(payload)
     print(f"🌐 已打开课表编辑器：{url}", file=sys.stderr)
     try:
@@ -3327,6 +3343,11 @@ def build_server():
                                "message": f"已是登录状态（{SITES[cur.site]['label']}），无需重新登录",
                                "expires": cur.expires}, ensure_ascii=False)
         target = (site or (cur.site if cur else DEFAULT_SITE)).lower()
+        if REMOTE:
+            return json.dumps({"ok": False, "remote": True,
+                               "message": "远程模式不能弹登录窗口：请在本机登录后把 "
+                                          "~/.garmin-mcp/session.json 复制到服务器"},
+                              ensure_ascii=False)
         with contextlib.redirect_stdout(sys.stderr):
             rc = do_login(target)
         return json.dumps(
@@ -3335,6 +3356,73 @@ def build_server():
             ensure_ascii=False)
 
     return mcp
+
+
+# ==========================================================================
+# HTTP / 远程模式（手机、多端共用同一份会话）
+# ==========================================================================
+def _auth_ok(header: str | None, token: str) -> bool:
+    """Bearer token 校验；token 为空表示不鉴权（只允许本机监听）。"""
+    if not token:
+        return True
+    return (header or "").strip() == f"Bearer {token}"
+
+
+def build_http_app(server, token: str = ""):
+    """把 MCP 的 streamable-http app 包一层：Bearer 鉴权 + /healthz。"""
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.responses import JSONResponse, PlainTextResponse
+    from starlette.routing import Mount
+
+    inner = server.streamable_http_app(stateless_http=True)
+
+    class AuthMiddleware:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+            path = scope.get("path", "")
+            if path in ("/healthz", "/"):
+                resp = PlainTextResponse("ok")
+                await resp(scope, receive, send)
+                return
+            headers = dict(scope.get("headers") or [])
+            auth = headers.get(b"authorization", b"").decode("latin-1")
+            if not _auth_ok(auth, token):
+                resp = JSONResponse({"error": "unauthorized"}, status_code=401)
+                await resp(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+
+    return Starlette(
+        routes=[Mount("/", app=inner)],
+        middleware=[Middleware(AuthMiddleware)],
+        lifespan=inner.router.lifespan_context,   # 必须转发，否则 streamable-http 不起 session manager
+    )
+
+
+def run_http(host: str = "0.0.0.0", port: int = 8765, token: str = "",
+             readonly: bool = False) -> int:
+    global REMOTE, READONLY
+    REMOTE = True
+    READONLY = readonly
+    if not token and host not in ("127.0.0.1", "localhost"):
+        print("❌ 监听非本机地址必须带 --token（否则任何人都能读你的跑步数据）", file=sys.stderr)
+        return 2
+    import uvicorn
+
+    server = build_server()
+    app = build_http_app(server, token)
+    print(f"🌐 Garmin MCP 已启动：http://{host}:{port}/mcp"
+          f"{'（只读）' if readonly else ''}", file=sys.stderr)
+    if token:
+        print("   鉴权：Authorization: Bearer <你的 token>", file=sys.stderr)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+    return 0
 
 
 # ==========================================================================
@@ -3368,6 +3456,23 @@ def main(argv: list[str] | None = None) -> int:
     if not argv:
         build_server().run()
         return 0
+
+    # HTTP / 远程模式：garmin_mcp.py --http [--host 0.0.0.0] [--port 8765]
+    #                     [--token xxx] [--readonly]
+    if "--http" in argv:
+        def _val(flag: str, default: str = "") -> str:
+            if flag in argv:
+                i = argv.index(flag)
+                if i + 1 < len(argv):
+                    return argv[i + 1]
+            return default
+
+        return run_http(
+            host=_val("--host", "0.0.0.0"),
+            port=int(_val("--port", "8765")),
+            token=_val("--token", os.environ.get("GARMIN_MCP_TOKEN", "")),
+            readonly="--readonly" in argv,
+        )
 
     cmd = argv[0]
     site: str | None = None

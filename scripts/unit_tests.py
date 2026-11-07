@@ -364,6 +364,39 @@ def test_calendar_merge():
         G.api_opt, G.api, G._dn = old_opt, old_api, old_dn
 
 
+def test_http_auth():
+    print("HTTP 鉴权与远程模式")
+    check("无 token 时放行（仅本机）", G._auth_ok(None, "") is True)
+    check("token 正确", G._auth_ok("Bearer abc", "abc") is True)
+    check("token 错误", G._auth_ok("Bearer abc", "xyz") is False)
+    check("缺 header 被拒", G._auth_ok("", "abc") is False)
+    check("大小写/空格容错", G._auth_ok("  Bearer abc  ", "abc") is True)
+
+    # 远程模式：不弹登录、不弹编辑器
+    old_remote, old_readonly = G.REMOTE, G.READONLY
+    try:
+        G.REMOTE = True
+        raised = False
+        try:
+            G.do_login("cn", 5)
+        except G.GarminError as e:
+            raised = "远程模式" in str(e)
+        check("远程模式禁止弹登录", raised)
+
+        out = G.open_workout_editor("t", [{"type": "warmup", "duration_min": 5}], timeout=1)
+        check("远程模式返回 dry-run", out.get("dry_run") is True and out.get("remote") is True, out)
+
+        G.READONLY = True
+        raised = False
+        try:
+            G._require_write()
+        except G.GarminError as e:
+            raised = "只读" in str(e)
+        check("--readonly 拦截写操作", raised)
+    finally:
+        G.REMOTE, G.READONLY = old_remote, old_readonly
+
+
 def test_write_gate():
     print("写操作开关")
     import os as _os
@@ -614,7 +647,7 @@ if __name__ == "__main__":
     for fn in (test_pace, test_sport, test_period, test_cookie_parse,
                test_csrf, test_session, test_compact, test_picker,
                test_weight_date, test_download, test_workout_builder,
-               test_editor_roundtrip, test_editor_flow, test_calendar_merge, test_write_gate, test_session_permissions,
+               test_editor_roundtrip, test_editor_flow, test_calendar_merge, test_http_auth, test_write_gate, test_session_permissions,
                test_bootstrap_fallback, test_refresh_lock, test_temperature,
                test_pr_sport, test_http_status_mapping, test_probe_result,
                test_rows_truncated, test_login_budget,

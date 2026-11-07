@@ -3,3 +3,4 @@ websockets>=17,<18
 pillow>=10
 tomlkit>=0.12
 ruamel.yaml>=0.18
+uvicorn>=0.30

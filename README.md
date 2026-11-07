@@ -296,6 +296,53 @@ AI：已创建，id 38177913 → 在 Garmin 打开
 
 ---
 
+## 手机 / 多端使用（HTTP 模式）
+
+默认是 stdio（只给本机客户端用）。想让**手机也能连**，用 HTTP 模式：
+
+```bash
+# 只监听本机（本机调试用，不需要 token）
+./.venv/bin/python garmin_mcp.py --http --port 8765
+
+# 对外提供服务（必须带 token）
+./.venv/bin/python garmin_mcp.py --http --host 0.0.0.0 --port 8765 \
+    --token "$(openssl rand -hex 16)" --readonly
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--http` | 用 streamable-http 传输（默认 stdio） |
+| `--host` / `--port` | 监听地址，默认 `0.0.0.0:8765`，端点路径 `/mcp` |
+| `--token` | Bearer 鉴权；监听非本机地址时**必填**，否则拒绝启动 |
+| `--readonly` | 只暴露只读工具（**公网强烈建议**），建课表等写操作直接拒绝 |
+
+客户端填：`URL = http://<host>:8765/mcp`，Header `Authorization: Bearer <token>`。
+
+**远程模式的三个差异**（避免手机端体验错位）：
+
+1. 不会弹「选站点」页，也不会弹课表编辑器 —— 这些窗口只会开在服务器屏幕上
+2. 登录必须在**有浏览器的本机**完成，然后把 `~/.garmin-mcp/session.json` 复制到服务器
+3. 会话续期由服务器进程负责；如果续期失败，把新的 `session.json` 再拷一次
+
+### 部署到一台常开的服务器
+
+```bash
+# 1. 本机先登录
+./.venv/bin/python garmin_mcp.py login
+
+# 2. 传代码和凭据
+rsync -av --exclude .venv ./ user@server:/opt/garmin-mcp/
+scp ~/.garmin-mcp/session.json user@server:/home/user/.garmin-mcp/session.json
+
+# 3. 服务器上装依赖并启动
+ssh user@server
+cd /opt/garmin-mcp && python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+./.venv/bin/python garmin_mcp.py --http --port 8765 --token <token> --readonly
+```
+
+建议用 systemd 常驻，并在前面加一层 HTTPS（Caddy / Nginx 反代，或 Cloudflare Tunnel）：
+大部分手机端 App 只接受 `https://` 的 MCP 地址。
+
 ## 隐私
 
 **数据的流向要说清楚：**

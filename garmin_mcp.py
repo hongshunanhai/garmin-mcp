@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -218,12 +218,13 @@ def _headers(s: Session, extra: dict | None = None) -> dict:
 
 
 class _Resp:
-    __slots__ = ("status", "text", "set_cookies", "content_type", "location")
+    __slots__ = ("status", "text", "content", "set_cookies", "content_type", "location")
 
     def __init__(self, status: int, text: str, set_cookies: list[str], content_type: str,
-                 location: str = ""):
+                 location: str = "", content: bytes | None = None):
         self.status = status
-        self.text = text
+        self.text = text                 # 永远是 str（已解码）
+        self.content = content if content is not None else text.encode("utf-8")
         self.set_cookies = set_cookies
         self.content_type = content_type
         self.location = location or ""
@@ -247,18 +248,16 @@ def _request(s: Session, method: str, path: str, *, params: dict | None = None,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = r.read()
-            text = data.decode("utf-8", "replace") if not raw else data
-            return _Resp(r.status, text if not raw else data,
+            return _Resp(r.status, data.decode("utf-8", "replace"),
                          r.headers.get_all("Set-Cookie") or [],
                          r.headers.get("Content-Type", ""),
-                         r.headers.get("Location", ""))
+                         r.headers.get("Location", ""), content=data)
     except urllib.error.HTTPError as e:
         data = e.read()
-        text = data.decode("utf-8", "replace") if not raw else data
-        return _Resp(e.code, text if not raw else data,
+        return _Resp(e.code, data.decode("utf-8", "replace"),
                      e.headers.get_all("Set-Cookie") or [],
                      e.headers.get("Content-Type", ""),
-                     e.headers.get("Location", ""))
+                     e.headers.get("Location", ""), content=data)
     except urllib.error.URLError as e:
         raise GarminError(f"网络请求失败：{e.reason}") from e
 
@@ -296,12 +295,7 @@ def api(s: Session, path: str, **params):
     return r.json()
 
 
-def api_soft(s: Session, path: str, **params):
-    """同 api()，但接口不存在/未开放时返回 None 而不是抛错（用于可选数据）。"""
-    try:
-        return api(s, path, **params)
-    except NotFound:
-        return None
+
 
 
 # --------------------------------------------------------------------------
@@ -425,13 +419,33 @@ def _csrf_from_html(html: str) -> str:
     return m.group(1) if m else ""
 
 
-def _probe(s: Session) -> bool:
-    """用当前 Cookie 打一个轻量接口，判断会话是否真的可用。"""
+def _probe_result(s: Session) -> str:
+    """探测会话：'ok' 可用 / 'auth' 明确失效 / 'error' 网络或服务端问题。
+
+    区分后两者很重要：网络抖动时如果当成「失效」，就会把用户已经登录好的
+    会话丢掉并重弹登录窗口（joyrun 踩过这个坑）。
+    """
     try:
         r = _request(s, "GET", "/gc-api/userprofile-service/userprofile/user-settings/")
-        return r.status == 200
     except Exception:
-        return False
+        return "error"
+    if r.status == 200:
+        return "ok"
+    if r.status in (401, 403):
+        return "auth"
+    if r.status in (301, 302, 303, 307, 308):
+        loc = (r.location or "").lower()
+        if "sso.garmin." in loc or "/sso/" in loc or "/signin" in loc:
+            return "auth"
+        return "error"
+    if r.status >= 500 or r.status == 429:
+        return "error"
+    return "auth"
+
+
+def _probe(s: Session) -> bool:
+    """兼容旧调用：只关心「现在能不能用」。"""
+    return _probe_result(s) == "ok"
 
 
 def _bootstrap(s: Session) -> bool:
@@ -731,12 +745,16 @@ def _do_login_impl(site: str, timeout_sec: int = 300) -> int:
     profile = _profile(site)
     profile.mkdir(parents=True, exist_ok=True)
 
-    # 已有有效会话则直接返回（同站点）
+    # 已有有效会话则直接返回（同站点）；网络问题不重弹窗口
     old = load_session()
-    if old and old.site == site and _probe(old):
+    if old and old.site == site and _probe_result(old) == "ok":
         print(f"✅ 已登录 {cfg['label']}（本地凭据有效，保存于 {old.saved_at}）")
         print("   如需切换账号: python3 garmin_mcp.py logout 后再 login")
         return 0
+
+    if old and old.site == site and _probe_result(old) == "error":
+        print("⚠️  连不上佳明服务器（网络问题），先不重新登录；当前凭据可能仍然有效，稍后再试")
+        return 3
 
     try:
         (profile / "DevToolsActivePort").unlink()
@@ -1051,13 +1069,13 @@ def _row(a: dict) -> dict:
 # ==========================================================================
 def t_get_profile(s: Session) -> dict:
     dn = _dn(s)
-    info = api_soft(s, f"/gc-api/userprofile-service/userprofile/personal-information/{dn}") or {}
-    soc = api_soft(s, f"/gc-api/userprofile-service/socialProfile/{dn}") or {}
-    life = api_soft(s, f"/gc-api/usersummary-service/stats/connectLifetimeTotals/{dn}") or {}
-    stats = api_soft(s, f"/gc-api/userstats-service/statistics/{dn}") or {}
-    zones = api_soft(s, "/gc-api/biometric-service/heartRateZones/v2?generateDefaults=true") or []
-    devs = api_soft(s, "/gc-api/device-service/deviceregistration/devices") or []
-    prefs = api_soft(s, "/gc-api/userprofile-service/userprofile/settings") or {}
+    info = api_opt(s, f"/gc-api/userprofile-service/userprofile/personal-information/{dn}") or {}
+    soc = api_opt(s, f"/gc-api/userprofile-service/socialProfile/{dn}") or {}
+    life = api_opt(s, f"/gc-api/usersummary-service/stats/connectLifetimeTotals/{dn}") or {}
+    stats = api_opt(s, f"/gc-api/userstats-service/statistics/{dn}") or {}
+    zones = api_opt(s, "/gc-api/biometric-service/heartRateZones/v2?generateDefaults=true") or []
+    devs = api_opt(s, "/gc-api/device-service/deviceregistration/devices") or []
+    prefs = api_opt(s, "/gc-api/userprofile-service/userprofile/settings") or {}
     fage = api_opt(s, f"/gc-api/fitnessage-service/fitnessage/{_today().isoformat()}") or {}
     pz = api_opt(s, "/gc-api/biometric-service/powerZones/sports/all") or []
 
@@ -1176,7 +1194,8 @@ def _streams(s: Session, activity_id: str, resolution_sec: int = 30) -> dict | N
     t0 = (pts[0].get("metrics") or [None])[ix["t"] or 0] if pts else None
     return compact({
         "采样秒": step,
-        "起点": datetime.fromtimestamp(t0 / 1000).strftime("%Y-%m-%d %H:%M:%S") if t0 else None,
+        "起点": (datetime.fromtimestamp(t0 / 1000, tz=UTC).astimezone()
+                 .strftime("%Y-%m-%d %H:%M:%S") if t0 else None),
         "点": out,
         "字段说明": {"t": "毫秒时间戳", "dist": "累计米", "hr": "bpm", "speed": "m/s",
                      "cad": "步/分", "alt": "米", "power": "瓦", "gct": "毫秒", "vo": "厘米"},
@@ -1190,9 +1209,9 @@ def t_get_activity(s: Session, activity_id: str, include_streams: bool = False,
         raise GarminError(f"找不到活动 {activity_id}")
     sm = a.get("summaryDTO") or {}
     md = a.get("metadataDTO") or {}
-    splits = api_soft(s, f"/gc-api/activity-service/activity/{activity_id}/splits") or {}
-    zones = api_soft(s, f"/gc-api/activity-service/activity/{activity_id}/hrTimeInZones") or []
-    weather = api_soft(s, f"/gc-api/activity-service/activity/{activity_id}/weather?enabled=true") or {}
+    splits = api_opt(s, f"/gc-api/activity-service/activity/{activity_id}/splits") or {}
+    zones = api_opt(s, f"/gc-api/activity-service/activity/{activity_id}/hrTimeInZones") or []
+    weather = api_opt(s, f"/gc-api/activity-service/activity/{activity_id}/weather?enabled=true") or {}
 
     laps = []
     for i, lap in enumerate(splits.get("lapDTOs") or [], 1):
@@ -1281,13 +1300,19 @@ def _period_range(period: str, date_str: str | None) -> tuple[date, date, str]:
     raise GarminError("period 只支持 week/month/year/all/custom（custom 需要 date_str='2026-01-01 ~ 2026-03-01'）")
 
 
-def _fetch_range(s: Session, start: date, end: date, sport: str | None = None) -> list[dict]:
+class _Rows(list):
+    """活动列表；truncated=True 表示撞到了 1000 条上限（极长的年/全部区间）。"""
+    truncated = False
+
+
+def _fetch_range(s: Session, start: date, end: date, sport: str | None = None) -> _Rows:
     dn = _dn(s)
     d = api(s, f"/gc-api/activitylist-service/activities/list/{dn}",
             startTimestampLocal=f"{start.isoformat()}T00:00:00.00",
             endTimestampLocal=f"{end.isoformat()}T23:59:59.999",
             start=1, limit=1000, activityTypeId=None)
-    rows = (d or {}).get("activityList") or []
+    rows = _Rows((d or {}).get("activityList") or [])
+    rows.truncated = len(rows) >= 1000
     t = _sport_key(sport)
     if t:
         parent = SPORT_PARENT.get(t, 0)
@@ -1360,22 +1385,24 @@ def t_get_period_stats(s: Session, period: str = "month", date_str: str | None =
             "距离_km": km((best or {}).get("distance")),
         }) if best else None,
         "分期": breakdown,
-        "说明": None if breakdown else "该区间没有记录",
+        "说明": ("记录超过 1000 条，结果可能被截断，建议缩小时间范围"
+                 if getattr(rows, "truncated", False)
+                 else (None if breakdown else "该区间没有记录")),
     })
 
 
 def t_get_training_status(s: Session, days: int = 30) -> dict:
     today = _today().isoformat()
     dn = _dn(s)
-    ts = api_soft(s, f"/gc-api/metrics-service/metrics/trainingstatus/daily/{today}") or {}
-    lb = api_soft(s, f"/gc-api/metrics-service/metrics/trainingloadbalance/latest/{today}") or {}
-    vo2 = api_soft(s, f"/gc-api/metrics-service/metrics/maxmet/latest/{today}") or {}
-    rd = api_soft(s, f"/gc-api/metrics-service/metrics/trainingreadiness/{today}") or []
-    hrv = api_soft(s, f"/gc-api/hrv-service/hrv/{today}")
-    pred = api_soft(s, f"/gc-api/metrics-service/metrics/racepredictions/latest/{dn}") or {}
-    lt = api_soft(s, "/gc-api/biometric-service/biometric/latestLactateThreshold") or []
+    ts = api_opt(s, f"/gc-api/metrics-service/metrics/trainingstatus/daily/{today}") or {}
+    lb = api_opt(s, f"/gc-api/metrics-service/metrics/trainingloadbalance/latest/{today}") or {}
+    vo2 = api_opt(s, f"/gc-api/metrics-service/metrics/maxmet/latest/{today}") or {}
+    rd = api_opt(s, f"/gc-api/metrics-service/metrics/trainingreadiness/{today}") or []
+    hrv = api_opt(s, f"/gc-api/hrv-service/hrv/{today}")
+    pred = api_opt(s, f"/gc-api/metrics-service/metrics/racepredictions/latest/{dn}") or {}
+    lt = api_opt(s, "/gc-api/biometric-service/biometric/latestLactateThreshold") or []
     start = (_today() - timedelta(days=max(7, int(days)))).isoformat()
-    weekly = api_soft(s, f"/gc-api/metrics-service/metrics/trainingstatus/weekly/{dn}",
+    weekly = api_opt(s, f"/gc-api/metrics-service/metrics/trainingstatus/weekly/{dn}",
                       fromCalendarDate=start, toCalendarDate=today) or {}
 
     latest = {}
@@ -1582,16 +1609,16 @@ def _weight_date(w: dict) -> str | None:
 def t_get_health(s: Session, day: str | None = None) -> dict:
     d = day or _today().isoformat()
     dn = _dn(s)
-    ds = api_soft(s, f"/gc-api/usersummary-service/usersummary/daily/{dn}", calendarDate=d) or {}
-    sleep = api_soft(s, "/gc-api/sleep-service/sleep/dailySleepData",
+    ds = api_opt(s, f"/gc-api/usersummary-service/usersummary/daily/{dn}", calendarDate=d) or {}
+    sleep = api_opt(s, "/gc-api/sleep-service/sleep/dailySleepData",
                      date=d, nonSleepBufferMinutes=60) or {}
-    hr = api_soft(s, "/gc-api/wellness-service/wellness/dailyHeartRate", date=d) or {}
-    stress = api_soft(s, f"/gc-api/wellness-service/wellness/dailyStress/{d}") or {}
-    bb = api_soft(s, "/gc-api/wellness-service/wellness/bodyBattery/reports/daily",
+    hr = api_opt(s, "/gc-api/wellness-service/wellness/dailyHeartRate", date=d) or {}
+    stress = api_opt(s, f"/gc-api/wellness-service/wellness/dailyStress/{d}") or {}
+    bb = api_opt(s, "/gc-api/wellness-service/wellness/bodyBattery/reports/daily",
                   startDate=d, endDate=d) or []
-    resp = api_soft(s, f"/gc-api/wellness-service/wellness/daily/respiration/{d}") or {}
-    spo2 = api_soft(s, f"/gc-api/wellness-service/wellness/daily/spo2/{d}") or {}
-    hrv = api_soft(s, f"/gc-api/hrv-service/hrv/{d}")
+    resp = api_opt(s, f"/gc-api/wellness-service/wellness/daily/respiration/{d}") or {}
+    spo2 = api_opt(s, f"/gc-api/wellness-service/wellness/daily/spo2/{d}") or {}
+    hrv = api_opt(s, f"/gc-api/hrv-service/hrv/{d}")
     weight = api_opt(s, "/gc-api/weight-service/weight/latest", date=d, ignorePriority="true") or {}
     bp = api_opt(s, f"/gc-api/bloodpressure-service/bloodpressure/dayview/{d}") or {}
     water = api_opt(s, f"/gc-api/usersummary-service/usersummary/hydration/allData/{d}") or {}
@@ -1691,8 +1718,8 @@ PR_TIME_TYPES = {1, 2, 3, 4, 5, 6, 11, 18, 19, 20, 21, 22, 23, 24, 25, 26}
 
 def t_get_personal_records(s: Session, sport: str | None = None) -> dict:
     dn = _dn(s)
-    prs = api_soft(s, f"/gc-api/personalrecord-service/personalrecord/prs/{dn}?includeHistory=false") or []
-    types = {t.get("id"): t for t in (api_soft(s, f"/gc-api/personalrecord-service/personalrecordtype/prtypes/{dn}") or [])}
+    prs = api_opt(s, f"/gc-api/personalrecord-service/personalrecord/prs/{dn}?includeHistory=false") or []
+    types = {t.get("id"): t for t in (api_opt(s, f"/gc-api/personalrecord-service/personalrecordtype/prtypes/{dn}") or [])}
     want = _sport_key(sport)
     rows = []
     for p in prs:
@@ -1725,7 +1752,11 @@ def t_get_personal_records(s: Session, sport: str | None = None) -> dict:
 
 
 def api_opt(s: Session, path: str, **params):
-    """可选数据：接口不存在、参数不对、暂时报错都当作「没有」，不影响主结果。"""
+    """可选数据（optional 语义）：接口不存在 / 参数不对 / 暂时报错一律当作「没有」。
+
+    主路径请用 `api()`（严格）；需要「拿不到就跳过」的装饰性数据才用本函数，
+    这样一眼能看出这个接口失败不应该影响整个工具的输出。
+    """
     try:
         return api(s, path, **params)
     except (NotFound, GarminError):
@@ -2388,7 +2419,7 @@ def t_get_calendar(s: Session, month: str | None = None) -> dict:
     else:
         t = _today()
         y, m = t.year, t.month
-    cal = api_soft(s, f"/gc-api/calendar-service/year/{y}/month/{m}") or {}
+    cal = api_opt(s, f"/gc-api/calendar-service/year/{y}/month/{m}") or {}
 
     first = date(y, m, 1)
     last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
@@ -2428,13 +2459,14 @@ def t_get_calendar(s: Session, month: str | None = None) -> dict:
         "月合计_km": round(sum(v["距离_km"] for v in days.values()), 2),
         "每天": [{"日期": k, **v} for k, v in sorted(days.items())],
         "事件": events,
-        "说明": None if days or events else "这个月没有活动，也没有训练/赛事安排",
+        "说明": ("该月活动超过 1000 条，可能被截断" if getattr(rows, "truncated", False)
+                 else (None if days or events else "这个月没有活动，也没有训练/赛事安排")),
     })
 
 
 def t_get_training(s: Session, workout_id: str | None = None, limit: int = 10) -> dict:
     """训练：我的计划 + 训练课程（可指定 id 看详情）+ 近期训练安排。"""
-    plans = api_soft(s, "/gc-api/trainingplan-service/trainingplan/plans?limit=50") or {}
+    plans = api_opt(s, "/gc-api/trainingplan-service/trainingplan/plans?limit=50") or {}
     plan_rows = []
     for p in (plans.get("trainingPlanList") or [])[:10]:
         plan_rows.append(compact({
@@ -2447,7 +2479,7 @@ def t_get_training(s: Session, workout_id: str | None = None, limit: int = 10) -
             "结束": p.get("endDate"),
         }))
 
-    workouts = api_soft(s, "/gc-api/workout-service/workouts",
+    workouts = api_opt(s, "/gc-api/workout-service/workouts",
                         start=1, limit=max(1, min(int(limit), 50)),
                         myWorkoutsOnly="true", sharedWorkoutsOnly="false",
                         includeAtp="false", orderBy="UPDATE_DATE", orderSeq="DESC") or []
@@ -2462,7 +2494,7 @@ def t_get_training(s: Session, workout_id: str | None = None, limit: int = 10) -
 
     detail = None
     if workout_id:
-        w = api_soft(s, f"/gc-api/workout-service/workout/{workout_id}")
+        w = api_opt(s, f"/gc-api/workout-service/workout/{workout_id}")
         if w:
             steps = []
             for st in (w.get("workoutSegments") or []):
@@ -2482,7 +2514,7 @@ def t_get_training(s: Session, workout_id: str | None = None, limit: int = 10) -
             })
 
     today = _today().isoformat()
-    events = api_soft(s, "/gc-api/calendar-service/events",
+    events = api_opt(s, "/gc-api/calendar-service/events",
                       limit=5, startDate=today, onlyTrainingEvents="true") or []
     upcoming = [compact({
         "日期": _pick(e, "date", "startDate"),
@@ -2500,10 +2532,10 @@ def t_get_training(s: Session, workout_id: str | None = None, limit: int = 10) -
 
 
 def t_get_gear(s: Session) -> dict:
-    rows = api_soft(s, "/gc-api/gear-service/gear/v2/list",
+    rows = api_opt(s, "/gc-api/gear-service/gear/v2/list",
                     start=0, limit=20, gearStatuses="ACTIVE",
                     sortOrder="firstUseDate_desc") or []
-    types = api_soft(s, "/gc-api/gear-service/gear/v2/user-gear-types") or {}
+    types = api_opt(s, "/gc-api/gear-service/gear/v2/user-gear-types") or {}
     out = []
     for g in rows if isinstance(rows, list) else []:
         used = float(g.get("distanceUsedMeters") or 0) / 1000.0
@@ -2527,9 +2559,9 @@ def t_get_gear(s: Session) -> dict:
 
 def t_get_achievements(s: Session) -> dict:
     dn = _dn(s)
-    earned = api_soft(s, "/gc-api/badge-service/badge/earned")
+    earned = api_opt(s, "/gc-api/badge-service/badge/earned")
     if not isinstance(earned, list):
-        earned = api_soft(s, f"/gc-api/badge-service/badge/earned/latest/{dn}") or []
+        earned = api_opt(s, f"/gc-api/badge-service/badge/earned/latest/{dn}") or []
     board = api_opt(s, "/gc-api/badge-service/badge/leaderboard?limit=25") or {}
     mine = None
     for c in (board.get("connections") or []):
@@ -2568,9 +2600,9 @@ def t_get_achievements(s: Session) -> dict:
 
 
 def t_get_challenges(s: Session) -> dict:
-    avail = api_soft(s, "/gc-api/badgechallenge-service/badgeChallenge/available?start=1&limit=21") or []
-    progress = api_soft(s, "/gc-api/badgechallenge-service/badgeChallenge/non-completed?desc=true&start=1&limit=50") or []
-    active = api_soft(s, "/gc-api/challenge-service/challenge/active") or {}
+    avail = api_opt(s, "/gc-api/badgechallenge-service/badgeChallenge/available?start=1&limit=21") or []
+    progress = api_opt(s, "/gc-api/badgechallenge-service/badgeChallenge/non-completed?desc=true&start=1&limit=50") or []
+    active = api_opt(s, "/gc-api/challenge-service/challenge/active") or {}
 
     def row(c):
         return compact({
@@ -2591,10 +2623,10 @@ def t_get_challenges(s: Session) -> dict:
 
 def t_get_social(s: Session) -> dict:
     dn = _dn(s)
-    followers = api_soft(s, f"/gc-api/follower-service/follow/followers/{dn}?start=1&limit=11") or []
-    followings = api_soft(s, f"/gc-api/follower-service/follow/followings/{dn}?start=1&limit=11") or []
+    followers = api_opt(s, f"/gc-api/follower-service/follow/followers/{dn}?start=1&limit=11") or []
+    followings = api_opt(s, f"/gc-api/follower-service/follow/followings/{dn}?start=1&limit=11") or []
     counts = api_opt(s, "/gc-api/follower-service/follow/followings/count") or {}
-    groups = api_soft(s, f"/gc-api/group-service/groups/{dn}?includeMembership=true") or []
+    groups = api_opt(s, f"/gc-api/group-service/groups/{dn}?includeMembership=true") or []
 
     def people(rows):
         return [compact({
@@ -2613,7 +2645,7 @@ def t_get_social(s: Session) -> dict:
 
 
 def t_get_devices(s: Session) -> dict:
-    rows = api_soft(s, "/gc-api/device-service/deviceregistration/devices") or []
+    rows = api_opt(s, "/gc-api/device-service/deviceregistration/devices") or []
     out = []
     for d in (rows if isinstance(rows, list) else []):
         out.append(compact({
@@ -2658,7 +2690,7 @@ def t_download_activity(s: Session, activity_id: str, fmt: str = "fit") -> dict:
         if r.status == 404:
             raise GarminError(f"活动 {activity_id} 不存在，或该活动没有原始文件")
         _check(s, r, "下载 FIT")
-        data = r.text if isinstance(r.text, bytes) else str(r.text).encode()
+        data = r.content
         try:
             zf = zipfile.ZipFile(io.BytesIO(data))
             name = next((n for n in zf.namelist() if n.lower().endswith(".fit")), None)
@@ -2675,12 +2707,16 @@ def t_download_activity(s: Session, activity_id: str, fmt: str = "fit") -> dict:
         if r.status == 404:
             raise GarminError(f"活动 {activity_id} 不存在，或该格式不可用")
         _check(s, r, f"导出 {fmt.upper()}")
-        data = r.text if isinstance(r.text, bytes) else str(r.text).encode()
+        data = r.content
         path = OUT / f"{safe}.{fmt}"
     else:
         raise GarminError("fmt 只支持 fit / gpx / tcx / kml / csv")
 
     path.write_bytes(data)
+    try:
+        os.chmod(path, 0o600)      # 含完整 GPS 轨迹，按凭据级别收紧权限
+    except OSError:
+        pass
     return {
         "文件": str(path),
         "格式": path.suffix.lstrip("."),
@@ -2788,8 +2824,8 @@ def _chart_activity(s: Session, activity_id: str) -> bytes:
     if not a:
         raise GarminError(f"找不到活动 {activity_id}")
     sm = a.get("summaryDTO") or {}
-    splits = api_soft(s, f"/gc-api/activity-service/activity/{activity_id}/splits") or {}
-    zones = api_soft(s, f"/gc-api/activity-service/activity/{activity_id}/hrTimeInZones") or []
+    splits = api_opt(s, f"/gc-api/activity-service/activity/{activity_id}/splits") or {}
+    zones = api_opt(s, f"/gc-api/activity-service/activity/{activity_id}/hrTimeInZones") or []
 
     laps = []
     for lp in splits.get("lapDTOs") or []:
@@ -3243,7 +3279,12 @@ def build_server():
     def login(site: str | None = None) -> str:
         import contextlib
         cur = load_session()
-        if cur and _probe(cur):
+        if cur and _probe_result(cur) == "error":
+            return json.dumps({"ok": False, "network_error": True,
+                               "message": "连不上佳明服务器（网络问题），稍后再试；"
+                                          "当前凭据可能仍然有效"},
+                              ensure_ascii=False)
+        if cur and _probe_result(cur) == "ok":
             return json.dumps({"ok": True, "already": True,
                                "message": f"已是登录状态（{SITES[cur.site]['label']}），无需重新登录",
                                "expires": cur.expires}, ensure_ascii=False)
@@ -3266,12 +3307,14 @@ def cmd_status() -> int:
     if not s:
         print("❌ 未登录。运行:  python3 garmin_mcp.py login")
         return 1
-    ok = _probe(s)
+    state = _probe_result(s)
     exp = datetime.fromtimestamp(s.expires).strftime("%Y-%m-%d %H:%M") if s.expires else "未知"
-    print(("✅ 登录有效" if ok else "⚠️  凭据存在但已失效") + f"（{SITES[s.site]['label']}）")
+    label = {"ok": "✅ 登录有效", "auth": "⚠️  凭据存在但已失效",
+             "error": "⚠️  无法验证（网络或服务端问题，凭据可能仍有效）"}[state]
+    print(label + f"（{SITES[s.site]['label']}）")
     print(f"   保存于: {s.saved_at}   本次有效至: {exp}")
     print(f"   凭据文件: {SESSION} (权限 {oct(SESSION.stat().st_mode)[-3:]})")
-    if ok:
+    if state == "ok":
         try:
             p = t_get_profile(s)
             life = p.get("生涯总计") or {}
@@ -3279,7 +3322,7 @@ def cmd_status() -> int:
                   f"VO2max {p.get('最大摄氧量')}")
         except Exception as e:
             print(f"   (概览获取失败: {e})")
-    return 0 if ok else 2
+    return {"ok": 0, "auth": 2, "error": 3}[state]
 
 
 def main(argv: list[str] | None = None) -> int:

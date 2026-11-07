@@ -197,9 +197,11 @@ def test_download():
     class FakeResp:
         def __init__(self, status, data):
             self.status = status
-            self.text = data
+            self.content = data
+            self.text = data.decode("utf-8", "replace")
             self.set_cookies = []
             self.content_type = ""
+            self.location = ""
 
     # 构造一个含 FIT 的 zip
     buf = io.BytesIO()
@@ -228,6 +230,10 @@ def test_download():
         out2 = G.t_download_activity(None, "123", "gpx")
         p2 = _P(out2["文件"])
         check("GPX 直接落盘", p2.suffix == ".gpx" and p2.read_bytes() == b"<gpx/>")
+        import os as _os
+        import stat as _st
+        check("导出文件 0600", _st.S_IMODE(_os.stat(p2).st_mode) == 0o600,
+              oct(_st.S_IMODE(_os.stat(p2).st_mode)))
 
         raised = False
         try:
@@ -481,6 +487,62 @@ def test_http_status_mapping():
     check("404 -> NotFound", raised)
 
 
+def test_probe_result():
+    print("会话探测三态")
+    old = G._request
+    s = G.Session(site="cn", cookies={"session": "x"}, csrf="c")
+
+    class R:
+        def __init__(self, status, location=""):
+            self.status = status
+            self.location = location
+            self.text = "{}"
+
+    try:
+        for status, expect, desc in [
+            (200, "ok", "200"),
+            (401, "auth", "401"),
+            (403, "auth", "403"),
+            (500, "error", "500"),
+            (429, "error", "429"),
+        ]:
+            G._request = lambda *a, _st=status, **k: R(_st)
+            check(f"{desc} -> {expect}", G._probe_result(s) == expect, G._probe_result(s))
+
+        G._request = lambda *a, **k: R(302, "https://sso.garmin.cn/portal/sso/zh-CN/sign-in")
+        check("302->sso -> auth", G._probe_result(s) == "auth")
+
+        G._request = lambda *a, **k: R(302, "https://cdn.example.com/x")
+        check("302->别处 -> error", G._probe_result(s) == "error")
+
+        def boom(*a, **k):
+            raise G.GarminError("网络挂了")
+
+        G._request = boom
+        check("网络异常 -> error（不误判失效）", G._probe_result(s) == "error")
+    finally:
+        G._request = old
+
+
+def test_rows_truncated():
+    print("列表截断标记")
+    r = G._Rows([{"a": 1}])
+    check("默认未截断", r.truncated is False)
+    old_api, old_dn = G.api, G._dn
+    try:
+        G._dn = lambda s: "guid"
+        G.api = lambda *a, **k: {"activityList": [{"activityId": i} for i in range(1000)]}
+        rows = G._fetch_range(G.Session(site="cn"), __import__("datetime").date(2026, 1, 1),
+                              __import__("datetime").date(2026, 12, 31))
+        check("满 1000 条标记截断", getattr(rows, "truncated", False) is True)
+        G.api = lambda *a, **k: {"activityList": [{"activityId": 1}]}
+        rows2 = G._fetch_range(G.Session(site="cn"), __import__("datetime").date(2026, 1, 1),
+                               __import__("datetime").date(2026, 12, 31))
+        check("少量数据不标记", getattr(rows2, "truncated", False) is False)
+    finally:
+        G.api, G._dn = old_api, old_dn
+
+
 def test_login_budget():
     print("登录预算")
     check("站点选择默认 120s", G._pick_site.__defaults__[0] == 120.0, G._pick_site.__defaults__)
@@ -501,7 +563,8 @@ if __name__ == "__main__":
                test_weight_date, test_download, test_workout_builder,
                test_editor_roundtrip, test_write_gate, test_session_permissions,
                test_bootstrap_fallback, test_refresh_lock, test_temperature,
-               test_pr_sport, test_http_status_mapping, test_login_budget,
+               test_pr_sport, test_http_status_mapping, test_probe_result,
+               test_rows_truncated, test_login_budget,
                test_pr_labels):
         fn()
     print()

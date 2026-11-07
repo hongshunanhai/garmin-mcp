@@ -313,18 +313,14 @@ def test_editor_roundtrip():
 
 def test_editor_flow():
     print("编辑器流程")
-    import json as _json
     import threading as _th
     import time as _t
-    import urllib.request
-    from pathlib import Path as _P
 
     old_open = G.webbrowser.open
     old_create = G._editor_create
     G.webbrowser.open = lambda *a, **k: True
     G._editor_create = lambda session, body: {"workout_id": 123, "url": "https://x/app/workout/123"}
     try:
-        payload = G.build_workout("t", [{"type": "warmup", "duration_min": 5}])
         box = {}
         th = _th.Thread(target=lambda: box.setdefault("r", G.open_workout_editor(
             "t", [{"type": "warmup", "duration_min": 5}], timeout=15)))

@@ -25,6 +25,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hmac
 import json
 import os
@@ -68,6 +70,10 @@ DEFAULT_SITE = os.environ.get("GARMIN_SITE", "cn").strip().lower()
 
 HOME = Path(os.environ.get("GARMIN_MCP_HOME", Path.home() / ".garmin-mcp"))
 _WRITE_LOCK = threading.RLock()
+
+# 多租户：托管模式下每个跑友一个目录（HOME/tenants/<uid>/session.json）
+TENANTS = HOME / "tenants"
+_TENANT_CTX: contextvars.ContextVar[str | None] = contextvars.ContextVar("tenant", default=None)
 
 # 远程（HTTP）模式下没有可交互的图形界面：不弹选站点页、不弹课表编辑器
 REMOTE = False
@@ -150,9 +156,19 @@ class Session:
         return bool(self.cookies.get("session")) and self.expires > time.time() + skew
 
 
+def tenant_dir(uid: str | None = None) -> Path:
+    return TENANTS / (uid or _TENANT_CTX.get() or "")
+
+
+def session_path() -> Path:
+    """有租户上下文时用租户目录，否则用单用户全局路径。"""
+    uid = _TENANT_CTX.get()
+    return (tenant_dir(uid) / "session.json") if uid else SESSION
+
+
 def load_session() -> Session | None:
     try:
-        d = json.loads(SESSION.read_text(encoding="utf-8"))
+        d = json.loads(session_path().read_text(encoding="utf-8"))
         site = d.get("site") if d.get("site") in SITES else DEFAULT_SITE
         s = Session(
             site=site,
@@ -174,7 +190,12 @@ def save_session(s: Session) -> None:
     这里存的是 GARMIN-SSO 这类长期凭据，泄漏面比「2 小时会话」大得多，
     所以不用 Path.write_text（它按 umask 建文件，可能是 644）。
     """
-    HOME.mkdir(parents=True, exist_ok=True)
+    path = session_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
     s.saved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data = json.dumps({
         "site": s.site,
@@ -188,7 +209,7 @@ def save_session(s: Session) -> None:
     _WRITE_LOCK.acquire()
     try:
         try:
-            fd = os.open(SESSION, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         except PermissionError as e:
             raise GarminError(
                 f"无法写入凭据目录 {HOME}（{e}）。"
@@ -199,7 +220,7 @@ def save_session(s: Session) -> None:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         try:
-            os.chmod(SESSION, 0o600)   # 已存在的旧文件可能更宽，再收紧一次
+            os.chmod(path, 0o600)      # 已存在的旧文件可能更宽，再收紧一次
         except OSError:
             pass
     finally:
@@ -208,7 +229,7 @@ def save_session(s: Session) -> None:
 
 def clear_session() -> None:
     try:
-        SESSION.unlink()
+        session_path().unlink()
     except FileNotFoundError:
         pass
 
@@ -3360,7 +3381,6 @@ def build_server():
         "已知站点时可直接传 site=cn 或 site=global 跳过选择。"))
     @_guard
     def login(site: str | None = None) -> str:
-        import contextlib
         cur = load_session()
         if cur and _probe_result(cur) == "error":
             return json.dumps({"ok": False, "network_error": True,

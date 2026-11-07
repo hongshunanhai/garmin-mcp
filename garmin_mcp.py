@@ -1977,7 +1977,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if cmd == "login":
             if "--manual" in argv:
-                return do_login_manual(site or DEFAULT_SITE)
+                return do_login_manual(site or _prompt_site_cli())
             return do_login(site)
         if cmd == "logout":
             clear_session()

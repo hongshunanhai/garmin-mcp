@@ -74,6 +74,7 @@ def build_cases(activity_id: str | None):
         ("get_achievements", lambda: G.t_get_achievements(S)),
         ("get_challenges", lambda: G.t_get_challenges(S)),
         ("get_social", lambda: G.t_get_social(S)),
+        ("search_events", lambda: G.t_search_events(S, "马拉松", 120, 3)),
     ]
     if activity_id:
         cases += [
@@ -87,6 +88,7 @@ def build_cases(activity_id: str | None):
             None, "自检用课表", [{"type": "warmup", "duration_min": 5}], "run", None, False)),
         ("schedule_workout(dry)", lambda: G.t_schedule_workout(None, "0", today, False)),
         ("push_workout(dry)", lambda: G.t_push_to_device(None, False)),
+        ("create_event(dry)", lambda: G.t_create_event(None, "自检赛事", today, "run", None, None, None, False)),
     ]
     return cases
 

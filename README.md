@@ -168,7 +168,7 @@ python3 garmin_mcp.py login
 
 ---
 
-## 提供的工具（21 个；默认只读，写操作需显式开启）
+## 提供的工具（24 个；默认只读，写操作需显式开启）
 
 **核心数据**
 
@@ -188,6 +188,7 @@ python3 garmin_mcp.py login
 | 工具 | 作用 |
 |---|---|
 | `get_training` | 我的训练计划、训练课程列表；传 `workout_id` 看课表步骤 |
+| `search_events` | 搜 Garmin 官方赛事库（名称/日期/城市/距离） |
 | `get_gear` | 跑鞋/自行车：已用里程、里程上限与剩余、使用次数 |
 | `get_devices` | 设备型号、固件、序列号、能力（血氧/训练准备度/HRV…）、最后同步 |
 
@@ -215,6 +216,8 @@ python3 garmin_mcp.py login
 | `schedule_workout` | 把课表排到某一天 |
 | `push_workout_to_device` | 「发送到设备」（手表下次同步即收到） |
 | `delete_workout` | 删除课表（用于撤销建错的） |
+| `create_event` | 把赛事加进日历（目标赛事，首页倒计时） |
+| `delete_event` | 删除日历里的赛事（撤销用） |
 
 明确**没有**封装：上传 FIT、删除活动、改标题、发评论等其它写操作。
 

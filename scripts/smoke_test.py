@@ -16,6 +16,7 @@ EXPECTED = {
     "get_calendar", "get_training", "get_gear", "get_achievements",
     "get_challenges", "get_social", "get_devices", "download_activity",
     "create_workout", "schedule_workout", "push_workout_to_device", "delete_workout",
+    "search_events", "create_event", "delete_event",
     "login", "render_chart",
 }
 

@@ -1011,6 +1011,8 @@ def t_get_profile(s: Session) -> dict:
     zones = api_soft(s, "/gc-api/biometric-service/heartRateZones/v2?generateDefaults=true") or []
     devs = api_soft(s, "/gc-api/device-service/deviceregistration/devices") or []
     prefs = api_soft(s, "/gc-api/userprofile-service/userprofile/settings") or {}
+    fage = api_opt(s, f"/gc-api/fitnessage-service/fitnessage/{_today().isoformat()}") or {}
+    pz = api_opt(s, "/gc-api/biometric-service/powerZones/sports/all") or []
 
     bio = info.get("biometricProfile") or {}
     z = zones[0] if isinstance(zones, list) and zones else {}
@@ -1058,6 +1060,16 @@ def t_get_profile(s: Session) -> dict:
             "活动天数": life.get("totalActiveDays"),
         }),
         "分项统计": by_type,
+        "身体年龄": compact({
+            "身体年龄": _pick(fage, "fitnessAge", "fitnessAgeValue"),
+            "实际年龄": _pick(fage, "chronologicalAge"),
+            "可达": _pick(fage, "achievableFitnessAge"),
+        }) if isinstance(fage, dict) and fage else None,
+        "功率区间": [compact({
+            "运动": z.get("sport"),
+            "FTP": z.get("functionalThresholdPower"),
+            "区间": [z.get(f"zone{i}Floor") for i in range(1, 8)],
+        }) for z in (pz if isinstance(pz, list) else [])[:3]] or None,
         "设备": devices,
         "站点": SITES[s.site]["label"],
     })
@@ -1402,6 +1414,83 @@ def t_get_training_status(s: Session, days: int = 30) -> dict:
         "解读要点": "训练状态看 trainingStatusFeedbackPhrase；负荷是否均衡看三档 vs 目标区间；"
                     "准备程度低时优先休息或轻松跑",
     })
+
+
+EVENT_TYPES = {"run": "running", "running": "running", "跑步": "running",
+               "ride": "cycling", "cycling": "cycling", "骑行": "cycling",
+               "swim": "swimming", "swimming": "swimming", "游泳": "swimming",
+               "tri": "multi_sport", "triathlon": "multi_sport", "铁三": "multi_sport"}
+
+
+def t_search_events(s: Session, keyword: str = "", days: int = 180, limit: int = 10) -> dict:
+    """搜索官方赛事库（只读）。"""
+    today = _today()
+    end = today + timedelta(days=max(7, int(days)))
+    rows = api_opt(s, "/gc-api/race-search/events",
+                   searchPhrase=keyword or "", fromDate=today.isoformat(), toDate=end.isoformat(),
+                   includeInPerson="true", includeVirtual="false",
+                   verifiedStatuses="OFFICIAL,VERIFIED",
+                   limit=max(1, min(int(limit), 50)),
+                   completionTargetDurationType="distance") or []
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        dists = [c.get("value") for c in (r.get("completionTargets") or [])
+                 if (c.get("unit") or "") == "meter"]
+        area = r.get("administrativeArea") or {}
+        out.append(compact({
+            "名称": r.get("nativeEventName") or r.get("eventName"),
+            "英文名": r.get("eventName") if r.get("nativeEventName") else None,
+            "日期": r.get("eventDate"),
+            "城市": area.get("cityNative") or area.get("cityEn"),
+            "距离_km": [round(d / 1000, 1) for d in dists] or None,
+            "类型": r.get("eventType"),
+            "官方": bool(r.get("isOfficial")),
+            "uuid": r.get("garminEventUuid"),
+        }))
+    return compact({
+        "关键词": keyword or None,
+        "区间": f"{today} ~ {end}",
+        "数量": len(out),
+        "赛事": out,
+        "说明": None if out else "这个关键词/时间窗内没搜到赛事",
+    })
+
+
+def t_create_event(s: Session, name: str, day: str, event_type: str = "running",
+                   location: str | None = None, note: str | None = None,
+                   distance_km: float | None = None, confirm: bool = False) -> dict:
+    """在 Garmin 日历里添加赛事（目标赛事）。"""
+    try:
+        date.fromisoformat(day)
+    except Exception:
+        raise GarminError(f"day 要 YYYY-MM-DD，收到 {day}")
+    et = EVENT_TYPES.get(str(event_type).strip().lower(), "running")
+    payload = {"eventName": name.strip(), "date": day, "eventType": et}
+    if location:
+        payload["location"] = location
+    if note:
+        payload["note"] = note
+    if distance_km:
+        payload["completionTarget"] = {"value": float(distance_km) * 1000.0, "unit": "meter"}
+
+    if not confirm:
+        return {"dry_run": True, "说明": "还没提交。确认后加 confirm=true", "将提交": payload}
+    _require_write()
+    r = _check(s, _request(s, "POST", "/gc-api/calendar-service/event",
+                           body=json.dumps(payload).encode(),
+                           headers={"Content-Type": "application/json"}), "创建赛事")
+    d = r.json() if r.text.strip() else {}
+    return {"ok": True, "id": d.get("id"), "名称": d.get("eventName"),
+            "日期": d.get("date"), "类型": d.get("eventType"),
+            "说明": "已加入 Garmin 日历，首页赛事卡片会显示倒计时"}
+
+
+def t_delete_event(s: Session, event_id: str, confirm: bool = False) -> dict:
+    if not confirm:
+        return {"dry_run": True, "说明": f"将删除赛事 {event_id}；确认后加 confirm=true"}
+    _require_write()
+    _check(s, _request(s, "DELETE", f"/gc-api/calendar-service/event/{event_id}"), "删除赛事")
+    return {"ok": True, "deleted": event_id}
 
 
 def _lt_pace(v) -> str | None:
@@ -3022,6 +3111,31 @@ def build_server():
         return _out(t_delete_workout(ensure_session() if confirm else load_session(),
                                      workout_id, confirm))
 
+    @mcp.tool(description=(
+        "搜索 Garmin 官方赛事库（只读）：按关键词（中英文都行）和未来天数查赛事，"
+        "返回名称、日期、城市、距离、是否官方。用于「下个月有什么比赛可以报」。"))
+    @_guard
+    def search_events(keyword: str = "", days: int = 180, limit: int = 10) -> str:
+        return _out(t_search_events(ensure_session(), keyword, days, limit))
+
+    @mcp.tool(description=(
+        "【写操作，需 GARMIN_ALLOW_WRITE=1】把赛事加进 Garmin 日历（目标赛事），首页显示倒计时。"
+        "参数 name、day(YYYY-MM-DD)、event_type(run/ride/swim/tri)，可选 location/note/distance_km。"
+        "默认 dry-run，confirm=true 才写入。"))
+    @_guard
+    def create_event(name: str, day: str, event_type: str = "running",
+                     location: str | None = None, note: str | None = None,
+                     distance_km: float | None = None, confirm: bool = False) -> str:
+        return _out(t_create_event(ensure_session() if confirm else load_session(),
+                                   name, day, event_type, location, note, distance_km, confirm))
+
+    @mcp.tool(description=(
+        "【写操作，需 GARMIN_ALLOW_WRITE=1】删除 Garmin 日历里的赛事（撤销用）。默认 dry-run。"))
+    @_guard
+    def delete_event(event_id: str, confirm: bool = False) -> str:
+        return _out(t_delete_event(ensure_session() if confirm else load_session(),
+                                   event_id, confirm))
+
     @mcp.tool(name="render_chart", description=(
         "把数据画成图，直接以图片返回（不需要任何外部工具）。"
         "kind='activity' 画单次活动的每公里配速+心率+心率区间（需 activity_id）；"
@@ -3141,6 +3255,9 @@ def main(argv: list[str] | None = None) -> int:
                 "schedule_workout": t_schedule_workout,
                 "push_workout_to_device": t_push_to_device,
                 "delete_workout": t_delete_workout,
+                "search_events": t_search_events,
+                "create_event": t_create_event,
+                "delete_event": t_delete_event,
             }.get(tool)
             if not fn:
                 print(f"未知工具: {tool}")
@@ -3153,7 +3270,8 @@ def main(argv: list[str] | None = None) -> int:
                     ensure_ascii=False, indent=1))
                 return 0
             write_tools = {"create_workout", "schedule_workout",
-                           "push_workout_to_device", "delete_workout"}
+                           "push_workout_to_device", "delete_workout",
+                           "create_event", "delete_event"}
             if tool in write_tools and not args.get("confirm"):
                 s = load_session()          # 预览不需要登录
             else:

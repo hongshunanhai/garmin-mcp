@@ -110,10 +110,10 @@ and SSO host differ:
 | SSO | `sso.garmin.cn` | `sso.garmin.com` |
 | Command | `login` | `login --site=global` |
 
-## Tools (21; read-only by default, writes are opt-in)
+## Tools (24; read-only by default, writes are opt-in)
 
 **Core** — `list_activities` · `get_activity` · `get_period_stats` · `get_calendar` ·
-`get_training_status` · `get_health` · `get_personal_records` · `get_profile`
+`get_training_status` · `get_health` · `get_personal_records` · `get_profile` · `search_events`
 
 **Training & gear** — `get_training` (plans + workouts) · `get_gear` · `get_devices`
 
@@ -121,8 +121,9 @@ and SSO host differ:
 
 **Other** — `render_chart` · `download_activity` (fit/gpx/tcx/kml/csv) · `login`
 
-**Workout authoring (opt-in: set `GARMIN_ALLOW_WRITE=1`)** —
-`create_workout` · `schedule_workout` · `push_workout_to_device` · `delete_workout`.
+**Workout & event authoring (opt-in: set `GARMIN_ALLOW_WRITE=1`)** —
+`create_workout` · `schedule_workout` · `push_workout_to_device` · `delete_workout` ·
+`create_event` · `delete_event`.
 Every write tool is dry-run by default and requires `confirm=true` to actually submit.
 
 No write endpoints are exposed (no upload, delete, rename, comment).

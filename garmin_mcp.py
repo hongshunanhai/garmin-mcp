@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -748,8 +749,8 @@ def _do_login_impl(site: str, timeout_sec: int = 300) -> int:
     # 已有有效会话则直接返回（同站点）；网络问题不重弹窗口
     old = load_session()
     if old and old.site == site and _probe_result(old) == "ok":
-        print(f"✅ 已登录 {cfg['label']}（本地凭据有效，保存于 {old.saved_at}）")
-        print("   如需切换账号: python3 garmin_mcp.py logout 后再 login")
+        print(f"✅ 已登录 {cfg['label']}（本地凭据有效，保存于 {old.saved_at}）", file=sys.stderr)
+        print("   如需切换账号: python3 garmin_mcp.py logout 后再 login", file=sys.stderr)
         return 0
 
     if old and old.site == site and _probe_result(old) == "error":
@@ -790,8 +791,8 @@ def _do_login_impl(site: str, timeout_sec: int = 300) -> int:
         except Exception as e:
             raise GarminError(f"打开登录页失败：{e}") from e
 
-        print(f"🌐 已打开 {cfg['label']} 登录窗口，请在窗口里完成登录（邮箱/手机号 + 密码 + 验证码）")
-        print("   登录成功后窗口会自动关闭，无需手动操作…")
+        print(f"🌐 已打开 {cfg['label']} 登录窗口，请在窗口里完成登录（邮箱/手机号 + 密码 + 验证码）", file=sys.stderr)
+        print("   登录成功后窗口会自动关闭，无需手动操作…", file=sys.stderr)
 
         t0 = time.time()
         while time.time() - t0 < timeout_sec:
@@ -807,7 +808,7 @@ def _do_login_impl(site: str, timeout_sec: int = 300) -> int:
                     refresh_session(s, force=True)  # 拿一份最长的有效期
                     save_session(s)
                     exp = datetime.fromtimestamp(s.expires).strftime("%Y-%m-%d %H:%M") if s.expires else "未知"
-                    print(f"✅ 登录成功，凭据已保存（仅存本机，权限 600，本次有效至 {exp}，会自动续期）")
+                    print(f"✅ 登录成功，凭据已保存（仅存本机，权限 600，本次有效至 {exp}，会自动续期）", file=sys.stderr)
                     return 0
             time.sleep(1.0)
         raise GarminError(f"等待登录超时（{timeout_sec} 秒）")
@@ -2029,6 +2030,7 @@ a{color:var(--accent)}
 </div>
 <script>
 const S = __INITIAL__;
+const BASE = location.pathname.replace(/\/+$/, '');
 const NAMES = {warmup:"热身", interval:"跑步", recovery:"慢跑恢复", cooldown:"缓和", rest:"休息"};
 const COLORS = {warmup:"warmup", interval:"interval", recovery:"recovery", cooldown:"cooldown", rest:"rest"};
 const el = id => document.getElementById(id);
@@ -2176,7 +2178,7 @@ async function post(url, body){
 async function create(){
   const btn=el('create'); btn.disabled=true; btn.textContent='创建中…';
   const steps = S.steps.map(wire);
-  const [code, res] = await post('/api/create', {name:S.name, steps:steps});
+  const [code, res] = await post(BASE + '/api/create', {name:S.name, steps:steps});
   if(code===200 && res.ok){
     el('result').innerHTML = '<div class="ok">✅ 已创建（id '+res.workout_id+'）</div>'+
       '<div style="margin-top:10px"><a href="'+res.url+'" target="_blank">在 Garmin 打开这节训练 →</a></div>'+
@@ -2192,15 +2194,15 @@ async function create(){
 }
 async function sched(id){
   const day=el('day').value; if(!day){ el('sub').innerHTML='<span class="err">先选日期</span>'; return; }
-  const [code,res]=await post('/api/schedule',{workout_id:id, day:day});
+  const [code,res]=await post(BASE + '/api/schedule',{workout_id:id, day:day});
   el('sub').innerHTML = code===200&&res.ok ? '<span class="ok">✅ 已排到 '+day+'</span>' : '<span class="err">❌ '+(res.message||'排期失败')+'</span>';
 }
 async function push(){
-  const [code,res]=await post('/api/push',{});
+  const [code,res]=await post(BASE + '/api/push',{});
   const box=el('sub'); if(!box) return;
   box.innerHTML = code===200&&res.ok ? '<span class="ok">✅ 已发送到设备，手表下次同步会收到</span>' : '<span class="err">❌ '+(res.message||'发送失败')+'</span>';
 }
-async function cancel(){ await post('/api/cancel',{}); document.body.innerHTML='<div style="padding:60px;text-align:center;font-size:16px">已取消，这个页面可以关掉了</div>'; }
+async function cancel(){ await post(BASE + '/api/cancel',{}); document.body.innerHTML='<div style="padding:60px;text-align:center;font-size:16px">已取消，这个页面可以关掉了</div>'; }
 render();
 </script></body></html>"""
 
@@ -2241,6 +2243,11 @@ def _start_editor(payload: dict) -> tuple[ThreadingHTTPServer, _EditorState, str
         "steps": _payload_to_steps(payload),
     }, ensure_ascii=False)
 
+    # 随机路径 token：编辑器是写操作入口，text/plain 简单请求可绕过 CORS preflight，
+    # 必须靠不可猜测的路径 token 鉴权，防止本机其它进程/恶意网页直接写入
+    token = secrets.token_urlsafe(16)
+    prefix = f"/{token}"
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -2257,36 +2264,42 @@ def _start_editor(payload: dict) -> tuple[ThreadingHTTPServer, _EditorState, str
                 pass
 
         def do_GET(self):
-            if self.path.startswith("/api/state"):
-                self._send(200, "application/json", _editor_json(state))
-            else:
+            if self.path == f"{prefix}/" or self.path == prefix:
                 self._send(200, "text/html; charset=utf-8",
                            WORKOUT_EDITOR_HTML.replace("__INITIAL__", initial))
+            else:
+                self._send(404, "text/plain", "not found")
 
         def do_POST(self):
+            if not self.path.startswith(f"{prefix}/api/"):
+                self._send(404, "text/plain", "not found")
+                return
             try:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n) or b"{}")
             except Exception:
                 body = {}
             try:
-                if self.path.startswith("/api/create"):
+                if self.path.startswith(f"{prefix}/api/create"):
+                    _require_write()
                     res = _editor_create(None, body)
                     state.phase, state.workout_id = "created", res["workout_id"]
                     self._send(200, "application/json", _editor_json(state, **res))
-                elif self.path.startswith("/api/schedule"):
+                elif self.path.startswith(f"{prefix}/api/schedule"):
+                    _require_write()
                     wid, day = body.get("workout_id"), body.get("day")
                     s = ensure_session(interactive=False)
                     _check(s, _request(s, "POST", f"/gc-api/workout-service/schedule/{wid}",
                                        body=json.dumps({"calendarDate": day}).encode(),
                                        headers={"Content-Type": "application/json"}), "排期")
                     self._send(200, "application/json", _editor_json(state, ok=True))
-                elif self.path.startswith("/api/push"):
+                elif self.path.startswith(f"{prefix}/api/push"):
+                    _require_write()
                     s = ensure_session(interactive=False)
                     _check(s, _request(s, "PUT", "/gc-api/workout-service/schedule/sendtodevices",
                                        body=b"", headers={"Content-Type": "application/json"}), "发送")
                     self._send(200, "application/json", _editor_json(state, ok=True))
-                elif self.path.startswith("/api/cancel"):
+                elif self.path.startswith(f"{prefix}/api/cancel"):
                     state.phase = "cancelled"
                     state.done.set()
                     self._send(200, "application/json", _editor_json(state))
@@ -2300,7 +2313,7 @@ def _start_editor(payload: dict) -> tuple[ThreadingHTTPServer, _EditorState, str
                 self._send(400, "application/json", json.dumps({"ok": False, "message": str(e)}, ensure_ascii=False))
     httpd = ThreadingHTTPServer(("127.0.0.1", _free_port()), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    return httpd, state, f"http://127.0.0.1:{httpd.server_port}/"
+    return httpd, state, f"http://127.0.0.1:{httpd.server_port}{prefix}/"
 
 
 def _payload_to_steps(payload: dict) -> list:

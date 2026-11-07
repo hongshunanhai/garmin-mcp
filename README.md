@@ -379,10 +379,16 @@ garmin-mcp/
 单独跑某一项：
 
 ```bash
-./.venv/bin/python scripts/unit_tests.py   # 纯逻辑单测（不联网）
-./.venv/bin/python scripts/smoke_test.py   # MCP 协议握手 + 工具清单
-bash -n install.sh                         # 安装脚本语法
+./.venv/bin/python scripts/unit_tests.py     # 纯逻辑单测（不联网）
+./.venv/bin/python scripts/smoke_test.py     # MCP 协议握手 + 工具清单
+./.venv/bin/python scripts/installer_test.py # 安装器深测（临时 HOME，5 种形态）
+./.venv/bin/python scripts/live_check.py     # 登录后逐工具跑一遍（要账号）
+./.venv/bin/ruff check .                     # 静态检查
+bash -n install.sh                           # 安装脚本语法
 ```
+
+`scripts/preflight.sh` 会依次跑：shell 语法 → 未提交改动 → 敏感信息（Cookie/JWT/CSRF/SSO）
+→ 单元测试 → MCP 握手 → ruff。CI 在 Ubuntu 和 macOS 上各跑一遍同样的东西。
 
 ## 免责声明
 

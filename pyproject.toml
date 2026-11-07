@@ -1,0 +1,17 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [".venv", "dsh-bundle", "__pycache__"]
+
+[tool.ruff.lint]
+# 只开确定有价值的规则，避免被风格类规则淹没
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = [
+  "E501",   # 长行：接口路径本来就长
+  "SIM105", # 用 contextlib.suppress 替换 try/except pass，可读性反而差
+  "SIM108", # 三元表达式在分支里不一定更好读
+  "SIM113", # enumerate 对“步序号”这种业务变量反而绕
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["B011"]

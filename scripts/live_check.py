@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """登录后逐工具自检：把 21 个工具挨个跑一遍，输出状态表。
 
   ./.venv/bin/python scripts/live_check.py                 # 全量

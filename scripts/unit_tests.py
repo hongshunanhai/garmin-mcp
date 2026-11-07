@@ -10,6 +10,7 @@
 
 用法:  ./.venv/bin/python scripts/unit_tests.py
 """
+import json
 import pathlib
 import sys
 import time
@@ -189,8 +190,8 @@ def test_weight_date():
 def test_download():
     print("导出原始文件")
     import io
-    import zipfile
     import tempfile
+    import zipfile
     from pathlib import Path as _P
 
     class FakeResp:
@@ -361,9 +362,7 @@ def test_session_permissions():
 
 def test_bootstrap_fallback():
     print("会话兜底")
-    import tempfile
     import time as _t
-    from pathlib import Path as _P
 
     old_req = G._request
     try:
@@ -402,8 +401,10 @@ def test_refresh_lock():
             content_type = "application/json"
 
             def __init__(self):
-                self.text = '{"expires":%d,"refreshExpires":%d}' % (
-                    int((_t.time() + 3600) * 1000), int((_t.time() + 7200) * 1000))
+                self.text = json.dumps({
+                    "expires": int((_t.time() + 3600) * 1000),
+                    "refreshExpires": int((_t.time() + 7200) * 1000),
+                })
 
         def fake_req(*a, **k):
             calls.append(1)
@@ -422,7 +423,8 @@ def test_refresh_lock():
         t1.start()
         _t.sleep(0.05)             # 让 t1 先进临界区
         t2.start()
-        t1.join(); t2.join()
+        t1.join()
+        t2.join()
 
         check("只消耗一次续期凭据", len(calls) == 1, f"实际 {len(calls)} 次")
         check("两个调用都算成功", out == [True, True], out)

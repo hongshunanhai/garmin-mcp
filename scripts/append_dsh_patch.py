@@ -67,7 +67,10 @@ def _has_entry(data) -> bool:
 
 
 def append(path: str, python_path: str, script_path: str) -> str:
-    text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+    text = ""
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
     data, structureless = _load(text)
 
     if _has_entry(data):
@@ -97,7 +100,8 @@ def append(path: str, python_path: str, script_path: str) -> str:
 
     if os.path.exists(path):
         shutil.copy2(path, path + ".bak")
-    open(path, "w", encoding="utf-8").write(new_text)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_text)
     return "added"
 
 

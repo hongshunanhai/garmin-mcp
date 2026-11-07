@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Garmin Connect MCP Server —— 让 AI 直接读取你的佳明训练数据。
 
 用法:
@@ -35,10 +34,10 @@ import subprocess
 import sys
 import threading
 import time
-import webbrowser
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -219,19 +218,21 @@ def _headers(s: Session, extra: dict | None = None) -> dict:
 
 
 class _Resp:
-    __slots__ = ("status", "text", "set_cookies", "content_type")
+    __slots__ = ("status", "text", "set_cookies", "content_type", "location")
 
-    def __init__(self, status: int, text: str, set_cookies: list[str], content_type: str):
+    def __init__(self, status: int, text: str, set_cookies: list[str], content_type: str,
+                 location: str = ""):
         self.status = status
         self.text = text
         self.set_cookies = set_cookies
         self.content_type = content_type
+        self.location = location or ""
 
     def json(self):
         try:
             return json.loads(self.text)
-        except Exception:
-            raise GarminError(f"返回不是 JSON（HTTP {self.status}）：{self.text[:160]}")
+        except Exception as e:
+            raise GarminError(f"返回不是 JSON（HTTP {self.status}）：{self.text[:160]}") from e
 
 
 def _request(s: Session, method: str, path: str, *, params: dict | None = None,
@@ -249,13 +250,15 @@ def _request(s: Session, method: str, path: str, *, params: dict | None = None,
             text = data.decode("utf-8", "replace") if not raw else data
             return _Resp(r.status, text if not raw else data,
                          r.headers.get_all("Set-Cookie") or [],
-                         r.headers.get("Content-Type", ""))
+                         r.headers.get("Content-Type", ""),
+                         r.headers.get("Location", ""))
     except urllib.error.HTTPError as e:
         data = e.read()
         text = data.decode("utf-8", "replace") if not raw else data
         return _Resp(e.code, text if not raw else data,
                      e.headers.get_all("Set-Cookie") or [],
-                     e.headers.get("Content-Type", ""))
+                     e.headers.get("Content-Type", ""),
+                     e.headers.get("Location", ""))
     except urllib.error.URLError as e:
         raise GarminError(f"网络请求失败：{e.reason}") from e
 
@@ -266,8 +269,14 @@ def _check(s: Session, r: _Resp, what: str = "") -> _Resp:
         return r
     if r.status == 204:
         return r
-    if r.status in (401, 302):
+    if r.status == 401:
         raise AuthRequired("登录已过期")
+    if r.status in (301, 302, 303, 307, 308):
+        loc = (r.location or "").lower()
+        # 只有跳到 SSO / 登录页才算掉登录；其它跳转照实透出（有的接口会 302 到 CDN/相对路径）
+        if "sso.garmin." in loc or "/sso/" in loc or "/signin" in loc or "portal/sso" in loc:
+            raise AuthRequired("登录已过期")
+        raise GarminError(f"接口返回跳转（HTTP {r.status} → {r.location[:80] or '无 Location'}）")
     if r.status == 403:
         raise GarminError(
             "被拒绝（403）。多半是会话过期或 CSRF 失效，请重新运行 login"
@@ -652,7 +661,7 @@ def _make_picker_handler(state: _PickState):
     return Handler
 
 
-def _pick_site(timeout: float = 180.0) -> _Picker | None:
+def _pick_site(timeout: float = 120.0) -> _Picker | None:
     """弹本地页面让用户选国区 / 国际版；超时或起不来返回 None。"""
     state = _PickState()
     try:
@@ -667,7 +676,7 @@ def _pick_site(timeout: float = 180.0) -> _Picker | None:
     try:
         webbrowser.open(url, new=1, autoraise=True)
     except Exception:
-        print(f"   浏览器没有自动打开，请手动访问上面的地址", file=sys.stderr)
+        print("   浏览器没有自动打开，请手动访问上面的地址", file=sys.stderr)
     if not state.done.wait(timeout) or not state.site:
         httpd.shutdown()
         return None
@@ -687,6 +696,7 @@ def _prompt_site_cli() -> str:
 
 
 def do_login(site: str | None = None, timeout_sec: int = 300) -> int:
+    """总预算 ≈ 选站点 120s + 登录 300s ≈ 420s，留出余量给客户端 600s 上限。"""
     """登录入口。site=None 时先弹「选择站点」页面（国区 / 国际版），再打开对应登录页。"""
     picker = None
     if not site:
@@ -760,7 +770,7 @@ def _do_login_impl(site: str, timeout_sec: int = 300) -> int:
             cdp.send("Page.enable")
             cdp.send("Page.navigate", {"url": signin})
         except Exception as e:
-            raise GarminError(f"打开登录页失败：{e}")
+            raise GarminError(f"打开登录页失败：{e}") from e
 
         print(f"🌐 已打开 {cfg['label']} 登录窗口，请在窗口里完成登录（邮箱/手机号 + 密码 + 验证码）")
         print("   登录成功后窗口会自动关闭，无需手动操作…")
@@ -1002,9 +1012,9 @@ def _sport_key(sport: str | None) -> str | None:
     """把 run/跑步/ride… 归一成佳明的 activityType key；all 返回 None。"""
     if not sport:
         return None
-    k = SPORT_ALIAS.get(str(sport).strip().lower(), None)
+    k = SPORT_ALIAS.get(str(sport).strip().lower())
     if k is None:
-        k = SPORT_ALIAS.get(str(sport).strip(), None)
+        k = SPORT_ALIAS.get(str(sport).strip())
     if k is None:
         raise GarminError(f"不认识的运动类型：{sport}（可用：run/ride/swim/walk/hike/strength/all）")
     return None if k == "all" else k
@@ -1185,17 +1195,17 @@ def t_get_activity(s: Session, activity_id: str, include_streams: bool = False,
     weather = api_soft(s, f"/gc-api/activity-service/activity/{activity_id}/weather?enabled=true") or {}
 
     laps = []
-    for i, l in enumerate(splits.get("lapDTOs") or [], 1):
+    for i, lap in enumerate(splits.get("lapDTOs") or [], 1):
         laps.append(compact({
-            "圈": l.get("lapIndex") or i,
-            "距离_km": km(l.get("distance")),
-            "用时": hms(l.get("duration")),
-            "配速": pace_str(l.get("averageSpeed")),
-            "均心率": num(l.get("averageHR"), 0),
-            "最大心率": num(l.get("maxHR"), 0),
-            "步频": num(l.get("averageRunCadence"), 0),
-            "爬升_m": num(l.get("elevationGain"), 0),
-            "功率": num(l.get("averagePower"), 0),
+            "圈": lap.get("lapIndex") or i,
+            "距离_km": km(lap.get("distance")),
+            "用时": hms(lap.get("duration")),
+            "配速": pace_str(lap.get("averageSpeed")),
+            "均心率": num(lap.get("averageHR"), 0),
+            "最大心率": num(lap.get("maxHR"), 0),
+            "步频": num(lap.get("averageRunCadence"), 0),
+            "爬升_m": num(lap.get("elevationGain"), 0),
+            "功率": num(lap.get("averagePower"), 0),
         }))
 
     zs = [{"区": z.get("zoneNumber"), "秒": num(z.get("secsInZone"), 0),
@@ -1369,13 +1379,13 @@ def t_get_training_status(s: Session, days: int = 30) -> dict:
                       fromCalendarDate=start, toCalendarDate=today) or {}
 
     latest = {}
-    for dev_id, v in ((ts.get("latestTrainingStatusData") or {})).items():
+    for dev_id, v in (ts.get("latestTrainingStatusData") or {}).items():
         latest[dev_id] = v
     first = next(iter(latest.values()), {}) if latest else {}
     acute = first.get("acuteTrainingLoadDTO") or {}
 
     bal = {}
-    for dev_id, v in ((lb.get("metricsTrainingLoadBalanceDTOMap") or {})).items():
+    for _dev, v in (lb.get("metricsTrainingLoadBalanceDTOMap") or {}).items():
         bal = v or {}
         break
 
@@ -1383,7 +1393,7 @@ def t_get_training_status(s: Session, days: int = 30) -> dict:
     gen = (vo2.get("generic") or {})
 
     series = []
-    for dev_id, items in ((weekly.get("reportData") or {})).items():
+    for _dev, items in (weekly.get("reportData") or {}).items():
         for it in (items or []):
             if (it.get("calendarDate") or "") < start:
                 continue
@@ -1499,8 +1509,8 @@ def t_create_event(s: Session, name: str, day: str, event_type: str = "running",
     """在 Garmin 日历里添加赛事（目标赛事）。"""
     try:
         date.fromisoformat(day)
-    except Exception:
-        raise GarminError(f"day 要 YYYY-MM-DD，收到 {day}")
+    except Exception as e:
+        raise GarminError(f"day 要 YYYY-MM-DD，收到 {day}") from e
     et = EVENT_TYPES.get(str(event_type).strip().lower(), "running")
     payload = {"eventName": name.strip(), "date": day, "eventType": et}
     if location:
@@ -1771,8 +1781,8 @@ def _pace_sec(text: str) -> int:
             total = int(m) * 60 + int(sec or 0)
         else:
             total = int(float(t))
-    except Exception:
-        raise GarminError(f"配速格式不对：{text}（要 5:00 这种 分:秒）")
+    except Exception as e:
+        raise GarminError(f"配速格式不对：{text}（要 5:00 这种 分:秒）") from e
     if total <= 0:
         raise GarminError(f"配速必须大于 0：{text}")
     return total
@@ -1843,9 +1853,7 @@ def build_workout(name: str, steps: list, sport: str = "run",
         raise GarminError("steps 不能为空")
 
     compiled = []
-    order = 0
-    for raw in steps:
-        order += 1
+    for order, raw in enumerate(steps, 1):
         if str(raw.get("type", "")).lower() == "repeat":
             times = int(raw["times"]) if "times" in raw else 1
             if times < 1:
@@ -2344,8 +2352,8 @@ def t_create_workout(s: Session, name: str, steps: list, sport: str = "run",
 def t_schedule_workout(s: Session, workout_id: str, day: str, confirm: bool = False) -> dict:
     try:
         date.fromisoformat(day)
-    except Exception:
-        raise GarminError(f"day 要 YYYY-MM-DD，收到 {day}")
+    except Exception as e:
+        raise GarminError(f"day 要 YYYY-MM-DD，收到 {day}") from e
     if not confirm:
         return {"dry_run": True, "说明": f"将把课表 {workout_id} 排到 {day}；确认后加 confirm=true"}
     _require_write()
@@ -2380,7 +2388,6 @@ def t_get_calendar(s: Session, month: str | None = None) -> dict:
     else:
         t = _today()
         y, m = t.year, t.month
-    dn = _dn(s)
     cal = api_soft(s, f"/gc-api/calendar-service/year/{y}/month/{m}") or {}
 
     first = date(y, m, 1)
@@ -2427,7 +2434,6 @@ def t_get_calendar(s: Session, month: str | None = None) -> dict:
 
 def t_get_training(s: Session, workout_id: str | None = None, limit: int = 10) -> dict:
     """训练：我的计划 + 训练课程（可指定 id 看详情）+ 近期训练安排。"""
-    dn = _dn(s)
     plans = api_soft(s, "/gc-api/trainingplan-service/trainingplan/plans?limit=50") or {}
     plan_rows = []
     for p in (plans.get("trainingPlanList") or [])[:10]:
@@ -2774,8 +2780,9 @@ def _stat_cards(d, x0, x1, y, items, h=124):
 
 
 def _chart_activity(s: Session, activity_id: str) -> bytes:
-    from PIL import Image, ImageDraw
     import io
+
+    from PIL import Image, ImageDraw
 
     a = api(s, f"/gc-api/activity-service/activity/{activity_id}")
     if not a:
@@ -2827,8 +2834,8 @@ def _chart_activity(s: Session, activity_id: str) -> bytes:
     X0, X1 = 236, 1904
     TOP, BASE = 410, 900
     PH = BASE - TOP
-    mx_p = max(l["pace"] for l in laps)
-    mn_p = min(l["pace"] for l in laps)
+    mx_p = max(x["pace"] for x in laps)
+    mn_p = min(x["pace"] for x in laps)
     pLo, pHi = mx_p + 40, max(120, mn_p - 25)      # 慢 -> 快
 
     for i in range(5):
@@ -2840,30 +2847,31 @@ def _chart_activity(s: Session, activity_id: str) -> bytes:
     n = len(laps)
     slot = (X1 - X0) / n
     bw = min(84, slot * 0.5)
-    for i, l in enumerate(laps):
+    for i, lap in enumerate(laps):
         cx = X0 + slot * i + slot / 2
-        h = PH * (pLo - l["pace"]) / (pLo - pHi)
+        h = PH * (pLo - lap["pace"]) / (pLo - pHi)
         y = BASE - h
-        fast = l["pace"] <= mn_p + 1
+        fast = lap["pace"] <= mn_p + 1
         d.rounded_rectangle([cx - bw / 2, y, cx + bw / 2, BASE], radius=12,
                             fill=BLUE_DK if fast else BLUE)
         if n <= 22:
-            d.text((cx, y - 16), _pace_txt(l["pace"]), font=_font(25, True), fill=INK, anchor="ms")
-        label = (f"{l['km']}" if l["dist"] >= 0.9 else f"{l['km'] - 1 + l['dist']:.1f}")
+            d.text((cx, y - 16), _pace_txt(lap["pace"]), font=_font(25, True), fill=INK, anchor="ms")
+        label = (f"{lap['km']}" if lap["dist"] >= 0.9
+                 else f"{lap['km'] - 1 + lap['dist']:.1f}")
         d.text((cx, BASE + 22), label, font=_font(22), fill=MUTED, anchor="ma")
 
     d.text((96, BASE + 22), "km", font=_font(22), fill=MUTED, anchor="lm")
 
     # 心率折线（右轴）
-    hrs = [l["hr"] for l in laps if l["hr"]]
+    hrs = [x["hr"] for x in laps if x["hr"]]
     if len(hrs) >= 2:
         hLo, hHi = min(hrs) - 8, max(hrs) + 8
         pts = []
-        for i, l in enumerate(laps):
-            if not l["hr"]:
+        for i, lap in enumerate(laps):
+            if not lap["hr"]:
                 continue
             cx = X0 + slot * i + slot / 2
-            y = BASE - PH * (l["hr"] - hLo) / max(1, hHi - hLo)
+            y = BASE - PH * (lap["hr"] - hLo) / max(1, hHi - hLo)
             pts.append((cx, y))
         if len(pts) >= 2:
             d.line(pts, fill=ORANGE, width=5, joint="curve")
@@ -2929,8 +2937,9 @@ def t_volume_series(s: Session, weeks: int = 12, sport: str = "run") -> list[dic
 
 
 def _chart_volume(s: Session, weeks: int = 12, sport: str = "run") -> bytes:
-    from PIL import Image, ImageDraw
     import io
+
+    from PIL import Image, ImageDraw
 
     series = t_volume_series(s, weeks, sport)
     if not series:
@@ -2992,6 +3001,7 @@ def _out(obj) -> str:
 def _guard(fn):
     """把内部异常翻译成对 agent 有意义的错误信息；同时保证会话可用。"""
     import functools
+
     from mcp.server.mcpserver.tools.base import ToolError
 
     @functools.wraps(fn)
@@ -3140,6 +3150,7 @@ def build_server():
         "创建跑步/骑行/游泳课表（对应网页「训练课程 → 创建训练」）。"
         "默认会弹出一个本地页面：把课表按佳明的样式（热身/跑步/恢复/缓和 + 重复组）画出来，"
         "用户可以改距离/配速/组数，点「创建到佳明」后才真正写入，并可当场排期、发送到设备。"
+        "（首次未登录时会先弹站点选择 120s + 登录窗口 300s，超时请重试）"
         "steps 是结构化步骤数组，例如："
         '[{"type":"warmup","duration_min":10},'
         ' {"type":"repeat","times":4,"steps":[{"type":"interval","distance_m":800,"pace":"5:00"},'

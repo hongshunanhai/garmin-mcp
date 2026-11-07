@@ -24,17 +24,20 @@ MANAGED = ("command", "args", "startup_timeout_sec", "tool_timeout_sec")
 
 
 def merge(path, python_path, script_path):
-    text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+    text = ""
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
     if text.strip():
         try:
             tomllib.loads(text)
         except tomllib.TOMLDecodeError as e:
-            raise SystemExit(f"  ✗ {path} 不是合法 TOML（{e}），已跳过，未做任何修改")
+            raise SystemExit(f"  ✗ {path} 不是合法 TOML（{e}），已跳过，未做任何修改") from e
 
     try:
         doc = tomlkit.parse(text) if text.strip() else tomlkit.document()
     except Exception as e:                       # tomlkit 解析异常同样拒绝
-        raise SystemExit(f"  ✗ {path} 无法解析（{e}），已跳过，未做任何修改")
+        raise SystemExit(f"  ✗ {path} 无法解析（{e}），已跳过，未做任何修改") from e
 
     servers = doc.get("mcp_servers")
     existed = False
@@ -59,14 +62,15 @@ def merge(path, python_path, script_path):
     try:
         parsed = tomllib.loads(new_text)
     except tomllib.TOMLDecodeError as e:
-        raise SystemExit(f"  ✗ 合并后 TOML 非法（{e}），已放弃写入")
+        raise SystemExit(f"  ✗ 合并后 TOML 非法（{e}），已放弃写入") from e
     rq = (parsed.get("mcp_servers") or {}).get("garmin")
     if not rq or rq.get("tool_timeout_sec") != 600.0 or rq.get("args") != [script_path]:
         raise SystemExit("  ✗ 合并结果不符合预期，已放弃写入")
 
     if os.path.exists(path):
         shutil.copy2(path, path + ".bak")
-    open(path, "w", encoding="utf-8").write(new_text)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_text)
     print(f"  ✓ {path}（{'更新' if existed else '新增'}）")
 
 

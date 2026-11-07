@@ -23,22 +23,25 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: 静态检查（脚本 / Python / JSON / TOML / SVG）
+      - name: shell 语法
         run: |
           bash -n install.sh
           bash -n scripts/preflight.sh
+
+      - name: 安装依赖（含 dev）
+        run: |
+          python -m venv .venv
+          ./.venv/bin/python -m pip install --quiet --upgrade pip
+          ./.venv/bin/python -m pip install --quiet -r requirements.txt -r requirements-dev.txt
+
+      - name: 静态检查（ruff）
+        run: ./.venv/bin/ruff check .
+
+      - name: 静态检查（JSON / TOML / SVG）
+        run: |
           python - <<'PY'
-          import ast, glob, json, pathlib, re, tomllib
+          import glob, json, pathlib, tomllib
           import xml.etree.ElementTree as ET
-
-          for f in ("garmin_mcp.py", "scripts/smoke_test.py", "scripts/unit_tests.py",
-                    "scripts/merge_codex_toml.py", "scripts/append_dsh_patch.py"):
-              ast.parse(pathlib.Path(f).read_text(encoding="utf-8"))
-
-          # shell 里 $VAR 紧跟中文会被当成变量名的一部分（C locale 下直接报错）
-          shell_bad = re.findall(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]",
-                                 pathlib.Path("install.sh").read_text(encoding="utf-8"))
-          assert not shell_bad, f"变量后紧跟非 ASCII 字符，请改用 ${{VAR}}：{shell_bad[:5]}"
 
           files = (glob.glob("examples/*.json")
                    + glob.glob("dsh-bundle/locale/*.json")
@@ -47,14 +50,8 @@ jobs:
               json.load(open(f, encoding="utf-8"))
           tomllib.load(open("examples/codex.config.toml", "rb"))
           ET.parse("dsh-bundle/icon.svg")
-          print(f"静态检查通过：{len(files)} 个 JSON + TOML + SVG")
+          print(f"JSON/TOML/SVG 检查通过：{len(files)} 个 JSON")
           PY
-
-      - name: 安装依赖
-        run: |
-          python -m venv .venv
-          ./.venv/bin/python -m pip install --quiet --upgrade pip
-          ./.venv/bin/python -m pip install --quiet -r requirements.txt
 
       - name: 单元测试
         run: ./.venv/bin/python scripts/unit_tests.py
@@ -62,13 +59,8 @@ jobs:
       - name: MCP 协议冒烟测试
         run: ./.venv/bin/python scripts/smoke_test.py
 
-      - name: 安装器（干净 HOME 下写入 + 幂等）
-        run: |
-          export HOME="$(mktemp -d)"
-          mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.zcode" "$HOME/.workbuddy"
-          ./install.sh --no-login --client=codex
-          grep -q "mcp_servers.garmin" "$HOME/.codex/config.toml"
-          ./install.sh --no-login --client=codex
-          COUNT=$(grep -c "mcp_servers.garmin" "$HOME/.codex/config.toml")
-          test "$COUNT" = "1"
-          echo "安装器 OK（幂等，未重复写入）"
+      - name: 安装器深测（临时 HOME，5 种形态）
+        run: ./.venv/bin/python scripts/installer_test.py
+
+      - name: 发布前自检（含 ruff / 单测 / 握手 / 敏感信息）
+        run: ./scripts/preflight.sh

@@ -611,39 +611,42 @@ def do_login_manual(site: str = DEFAULT_SITE) -> int:
 # 会话入口：每次工具调用前调用它（含自动续期 / 自动弹窗登录）
 # --------------------------------------------------------------------------
 def ensure_session(interactive: bool = True) -> Session:
+    """每次工具调用前调用：确保有可用会话。
+
+    顺序：读本地会话 → 剩余不足 45 分钟就先静默续期 → 仍不可用则（可选）弹窗登录。
+    """
     s = load_session()
     if s is None:
-        if interactive:
-            print("未检测到登录凭据，正在打开登录窗口…", file=sys.stderr)
-            rc = do_login(DEFAULT_SITE)
-            if rc != 0:
-                raise AuthRequired("登录未完成")
-            s = load_session()
-            if s is None:
-                raise AuthRequired()
-        else:
+        if not interactive:
+            raise AuthRequired()
+        print("未检测到登录凭据，正在打开登录窗口…", file=sys.stderr)
+        do_login(DEFAULT_SITE)
+        s = load_session()
+        if s is None:
             raise AuthRequired()
 
-    if s.alive(60) and s.csrf:
+    now = time.time()
+    # 快到期时先续期；失败不抛（此时会话本身可能还没过期，继续用）
+    if (s.cookies.get("session") and s.expires < now + 45 * 60
+            and (not s.refresh_expires or s.refresh_expires > now)):
+        refresh_session(s, force=False)
+
+    if s.alive(5) and s.csrf:
         return s
 
-    # 1) 尝试静默续期
-    if refresh_session(s, force=False) and s.alive(0):
-        return s
-
-    # 2) 会话还有效但缺 csrf（例如从别的工具导入的凭据）
-    if s.alive(0) and not s.csrf:
+    # 会话还有效但缺 csrf（例如从别的工具导入的凭据）
+    if s.alive(0):
         _bootstrap(s)
         if s.csrf and _probe(s):
             save_session(s)
             return s
 
-    # 3) 真的过期了：重新走一次登录（独立 profile 里 SSO Cookie 还在，通常点一下就好）
+    # 真的过期了：重新走一次登录（专用 profile 里 SSO Cookie 通常还在，点一下即可）
     if interactive:
         print("登录已过期，正在重新打开登录窗口…", file=sys.stderr)
-        rc = do_login(s.site)
+        do_login(s.site)
         s2 = load_session()
-        if rc == 0 and s2:
+        if s2:
             return s2
     raise AuthRequired()
 

@@ -26,7 +26,6 @@
 from __future__ import annotations
 
 import contextlib
-import contextvars
 import hmac
 import json
 import os
@@ -70,10 +69,6 @@ DEFAULT_SITE = os.environ.get("GARMIN_SITE", "cn").strip().lower()
 
 HOME = Path(os.environ.get("GARMIN_MCP_HOME", Path.home() / ".garmin-mcp"))
 _WRITE_LOCK = threading.RLock()
-
-# 多租户：托管模式下每个跑友一个目录（HOME/tenants/<uid>/session.json）
-TENANTS = HOME / "tenants"
-_TENANT_CTX: contextvars.ContextVar[str | None] = contextvars.ContextVar("tenant", default=None)
 
 # 远程（HTTP）模式下没有可交互的图形界面：不弹选站点页、不弹课表编辑器
 REMOTE = False
@@ -156,19 +151,9 @@ class Session:
         return bool(self.cookies.get("session")) and self.expires > time.time() + skew
 
 
-def tenant_dir(uid: str | None = None) -> Path:
-    return TENANTS / (uid or _TENANT_CTX.get() or "")
-
-
-def session_path() -> Path:
-    """有租户上下文时用租户目录，否则用单用户全局路径。"""
-    uid = _TENANT_CTX.get()
-    return (tenant_dir(uid) / "session.json") if uid else SESSION
-
-
 def load_session() -> Session | None:
     try:
-        d = json.loads(session_path().read_text(encoding="utf-8"))
+        d = json.loads(SESSION.read_text(encoding="utf-8"))
         site = d.get("site") if d.get("site") in SITES else DEFAULT_SITE
         s = Session(
             site=site,
@@ -190,7 +175,7 @@ def save_session(s: Session) -> None:
     这里存的是 GARMIN-SSO 这类长期凭据，泄漏面比「2 小时会话」大得多，
     所以不用 Path.write_text（它按 umask 建文件，可能是 644）。
     """
-    path = session_path()
+    path = SESSION
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(path.parent, 0o700)
@@ -229,7 +214,7 @@ def save_session(s: Session) -> None:
 
 def clear_session() -> None:
     try:
-        session_path().unlink()
+        SESSION.unlink()
     except FileNotFoundError:
         pass
 
@@ -449,11 +434,6 @@ class CDP:
         self.session_id = self.send("Target.attachToTarget",
                                     {"targetId": self._target_id, "flatten": True})["sessionId"]
         return self.session_id
-
-    def eval(self, expr: str):
-        r = self.send("Runtime.evaluate",
-                      {"expression": expr, "returnByValue": True, "awaitPromise": True})
-        return r.get("result", {}).get("value")
 
     def cookies(self) -> dict:
         raw = self.browser_send("Storage.getCookies").get("cookies") or []

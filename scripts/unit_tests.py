@@ -328,6 +328,126 @@ def test_write_gate():
             _os.environ["GARMIN_ALLOW_WRITE"] = old
 
 
+def test_session_permissions():
+    print("凭据文件权限")
+    import os as _os
+    import stat as _stat
+    import tempfile
+    from pathlib import Path as _P
+
+    old_home, old_session = G.HOME, G.SESSION
+    tmp = _P(tempfile.mkdtemp())
+    G.HOME, G.SESSION = tmp, tmp / "session.json"
+    try:
+        # 先放一个 644 的旧文件，验证会被收紧
+        G.SESSION.write_text("{}")
+        _os.chmod(G.SESSION, 0o644)
+        sess = G.Session(site="cn", cookies={"session": "x"}, csrf="c")
+        G.save_session(sess)
+        mode = _stat.S_IMODE(G.SESSION.stat().st_mode)
+        check("写成 0600", mode == 0o600, oct(mode))
+
+        # 新文件直接建，中途不存在 644 窗口
+        G.SESSION.unlink()
+        old_mask = _os.umask(0o022)
+        try:
+            G.save_session(sess)
+        finally:
+            _os.umask(old_mask)
+        check("新建即 0600", _stat.S_IMODE(G.SESSION.stat().st_mode) == 0o600)
+    finally:
+        G.HOME, G.SESSION = old_home, old_session
+
+
+def test_bootstrap_fallback():
+    print("会话兜底")
+    import tempfile
+    import time as _t
+    from pathlib import Path as _P
+
+    old_req = G._request
+    try:
+        class R:
+            status = 200
+            text = "<html><head><meta name=\"csrf-token\" content=\"abc\"></head></html>"
+            set_cookies = []
+            content_type = "text/html"
+
+        G._request = lambda *a, **k: R()
+        s = G.Session(site="cn", cookies={"session": "x"})
+        ok = G._bootstrap(s)
+        check("拿到 csrf", ok and s.csrf == "abc")
+        check("没有 SESSION_EXPIRES 也给出有效期", s.expires > _t.time(), s.expires)
+        check("有效期不超过 1 小时", s.expires <= _t.time() + 3600, s.expires)
+        check("alive() 为真（不会反复弹登录）", s.alive(0) is True)
+    finally:
+        G._request = old_req
+
+
+def test_refresh_lock():
+    print("并发续期")
+    import tempfile
+    import threading as _th
+    import time as _t
+    from pathlib import Path as _P
+
+    old_home, old_session, old_req = G.HOME, G.SESSION, G._request
+    tmp = _P(tempfile.mkdtemp())
+    G.HOME, G.SESSION = tmp, tmp / "session.json"
+    calls = []
+    try:
+        class R:
+            status = 200
+            set_cookies = ["session=NEW; Path=/", "SESSIONID=N2; Path=/"]
+            content_type = "application/json"
+
+            def __init__(self):
+                self.text = '{"expires":%d,"refreshExpires":%d}' % (
+                    int((_t.time() + 3600) * 1000), int((_t.time() + 7200) * 1000))
+
+        def fake_req(*a, **k):
+            calls.append(1)
+            _t.sleep(0.3)          # 模拟网络往返，放大并发窗口
+            return R()
+
+        G._request = fake_req
+        base = G.Session(site="cn", cookies={"session": "A", "SESSIONID": "B"}, csrf="c",
+                         expires=_t.time() + 60, refresh_expires=_t.time() + 3600)
+        G.save_session(base)
+        s1, s2 = G.load_session(), G.load_session()
+
+        out = []
+        t1 = _th.Thread(target=lambda: out.append(G.refresh_session(s1, force=True)))
+        t2 = _th.Thread(target=lambda: out.append(G.refresh_session(s2, force=True)))
+        t1.start()
+        _t.sleep(0.05)             # 让 t1 先进临界区
+        t2.start()
+        t1.join(); t2.join()
+
+        check("只消耗一次续期凭据", len(calls) == 1, f"实际 {len(calls)} 次")
+        check("两个调用都算成功", out == [True, True], out)
+        check("后来者拿到了新 Cookie", all(x is True for x in out))
+    finally:
+        G.HOME, G.SESSION, G._request = old_home, old_session, old_req
+
+
+def test_temperature():
+    print("气温单位")
+    check("华氏 59 -> 15.0", G._temp_c(59) == 15.0, G._temp_c(59))
+    check("摄氏 15 -> 15.0", G._temp_c(15) == 15.0, G._temp_c(15))
+    check("摄氏 32 不被误转", G._temp_c(32) == 32.0, G._temp_c(32))
+    check("None -> None", G._temp_c(None) is None)
+    check("空串 -> None", G._temp_c("") is None)
+
+
+def test_pr_sport():
+    print("个人纪录运动类型")
+    check("字符串", G._pr_sport({"activityType": "running"}, {}) == "跑步")
+    check("对象", G._pr_sport({"activityType": {"typeKey": "running"}}, {}) == "跑步")
+    check("对象无 typeKey 回落 meta", G._pr_sport({"activityType": {}}, {"sport": "CYCLING"}) == "骑行")
+    check("都没有不崩", G._pr_sport({}, {}) == "未知")
+
+
 def test_pr_labels():
     print("个人纪录标签")
     check("5K 有时间型", 3 in G.PR_TIME_TYPES)
@@ -339,7 +459,9 @@ if __name__ == "__main__":
     for fn in (test_pace, test_sport, test_period, test_cookie_parse,
                test_csrf, test_session, test_compact, test_picker,
                test_weight_date, test_download, test_workout_builder,
-               test_editor_roundtrip, test_write_gate, test_pr_labels):
+               test_editor_roundtrip, test_write_gate, test_session_permissions,
+               test_bootstrap_fallback, test_refresh_lock, test_temperature,
+               test_pr_sport, test_pr_labels):
         fn()
     print()
     if FAILS:

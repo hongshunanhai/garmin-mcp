@@ -163,9 +163,14 @@ def load_session() -> Session | None:
 
 
 def save_session(s: Session) -> None:
+    """写凭据。**先以 0600 建文件再写内容**，避免出现 644 明文窗口。
+
+    这里存的是 GARMIN-SSO 这类长期凭据，泄漏面比「2 小时会话」大得多，
+    所以不用 Path.write_text（它按 umask 建文件，可能是 644）。
+    """
     HOME.mkdir(parents=True, exist_ok=True)
     s.saved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    SESSION.write_text(json.dumps({
+    data = json.dumps({
         "site": s.site,
         "cookies": {k: v for k, v in s.cookies.items() if v},
         "csrf": s.csrf,
@@ -173,11 +178,16 @@ def save_session(s: Session) -> None:
         "expires": s.expires,
         "refresh_expires": s.refresh_expires,
         "display_name": s.display_name,
-    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    }, ensure_ascii=False, indent=1).encode("utf-8")
+    fd = os.open(SESSION, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.chmod(SESSION, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    finally:
+        try:
+            os.chmod(SESSION, 0o600)   # 已存在的旧文件可能更宽，再收紧一次
+        except OSError:
+            pass
 
 
 def clear_session() -> None:
@@ -432,7 +442,17 @@ def _bootstrap(s: Session) -> bool:
             s.refresh_expires = float(d.get("refreshExpires") or 0) / 1000.0
         except Exception:
             pass
+    # 兜底：佳明改版导致正则失配时，expires 会是 0 → alive() 恒 False →
+    # 每次工具调用都重弹登录窗口（死循环）。给一个保守的假设值，靠 refresh 续。
+    now = time.time()
+    if not s.expires or s.expires < now:
+        s.expires = now + 45 * 60
+        if not s.refresh_expires or s.refresh_expires < s.expires:
+            s.refresh_expires = now + 90 * 60
     return bool(s.csrf)
+
+
+_REFRESH_LOCK = threading.RLock()
 
 
 def refresh_session(s: Session, force: bool = False) -> bool:
@@ -440,37 +460,54 @@ def refresh_session(s: Session, force: bool = False) -> bool:
 
     端点：POST /modern/di-oauth/refreshToken（无 body，必须带 CSRF 头）
     返回：{"expires":…,"refreshExpires":…} + Set-Cookie 轮换 session/SESSIONID
-    ⚠️ 续期凭据一次性：成功后必须立刻 save_session()，旧的不能再用。
+
+    ⚠️ 续期凭据**只能用一次**：两个工具并发续期时，后者会拿已作废的 Cookie
+    去请求 → 401 → 被误判成「掉登录」并弹窗。所以整段（检查+请求+落盘）
+    都在 `_REFRESH_LOCK` 里；后来者直接采用先到者落盘的新会话。
     """
     if not s.cookies.get("session") or not s.csrf:
         return False
-    if not force and s.expires - time.time() > 45 * 60:
-        return False
-    if s.refresh_expires and s.refresh_expires < time.time():
-        return False  # 宽限期已过，只能重新登录
-    try:
-        r = _request(s, "POST", "/modern/di-oauth/refreshToken",
-                     headers={"Content-Type": "application/json"})
-    except Exception:
-        return False
-    if r.status != 200:
-        return False
-    got = False
-    for sc in r.set_cookies:
-        name, _, rest = sc.partition("=")
-        if name in ("session", "SESSIONID") and rest:
-            s.cookies[name] = rest.split(";")[0]
-            got = True
-    try:
-        d = json.loads(r.text)
-        s.expires = float(d.get("expires") or 0) / 1000.0
-        s.refresh_expires = float(d.get("refreshExpires") or 0) / 1000.0
-    except Exception:
-        pass
-    if got:
-        save_session(s)
-    return got
 
+    with _REFRESH_LOCK:
+        now = time.time()
+        if not force and s.expires - now > 45 * 60:
+            return False
+        if s.refresh_expires and s.refresh_expires < now:
+            return False  # 宽限期已过，只能重新登录
+
+        # 别的线程/进程刚续过？直接用它的结果，不再消耗一次凭据
+        cur = load_session()
+        if cur and cur.site == s.site and cur.expires > s.expires + 30:
+            s.cookies.update(cur.cookies)
+            s.csrf = cur.csrf or s.csrf
+            s.expires, s.refresh_expires = cur.expires, cur.refresh_expires
+            return True
+
+        try:
+            r = _request(s, "POST", "/modern/di-oauth/refreshToken",
+                         headers={"Content-Type": "application/json"})
+        except Exception:
+            return False
+        if r.status != 200:
+            return False
+
+        got = False
+        for sc in r.set_cookies:
+            name, _, rest = sc.partition("=")
+            if name in ("session", "SESSIONID") and rest:
+                s.cookies[name] = rest.split(";")[0]
+                got = True
+        try:
+            d = json.loads(r.text)
+            s.expires = float(d.get("expires") or 0) / 1000.0
+            s.refresh_expires = float(d.get("refreshExpires") or 0) / 1000.0
+        except Exception:
+            pass
+        if not s.expires:
+            s.expires = time.time() + 45 * 60
+        if got:
+            save_session(s)
+        return got
 
 
 # --------------------------------------------------------------------------
@@ -1199,8 +1236,8 @@ def t_get_activity(s: Session, activity_id: str, include_streams: bool = False,
     }
     if weather:
         out["天气"] = compact({
-            "气温_C": num((weather.get("temp") - 32) * 5 / 9, 1) if weather.get("temp") is not None else None,
-            "体感_C": num((weather.get("apparentTemp") - 32) * 5 / 9, 1) if weather.get("apparentTemp") is not None else None,
+            "气温_C": _temp_c(weather.get("temp")),
+            "体感_C": _temp_c(weather.get("apparentTemp")),
             "湿度_%": num(weather.get("relativeHumidity"), 0),
             "风速": num(weather.get("windSpeed"), 0),
             "天气": (weather.get("weatherTypeDTO") or {}).get("desc"),
@@ -1506,6 +1543,22 @@ def _lt_pace(v) -> str | None:
     return f"{m}'{sec:02d}\""
 
 
+def _temp_c(v) -> float | None:
+    """把天气温度统一成摄氏度。
+
+    佳明 /weather 接口的单位并不稳定：实测国区「公制」账号返回的仍是华氏
+    （59 = 15°C，且 dewPoint 19 只有按华氏才自洽），但也有账号/站点直接给摄氏。
+    这里按数值范围判断：>45 视为华氏，否则视为摄氏。
+    """
+    if v is None or v == "":
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round((f - 32) * 5.0 / 9.0, 1) if f > 45 else round(f, 1)
+
+
 def _weight_date(w: dict) -> str | None:
     v = w.get("calendarDate")
     if isinstance(v, str) and v:
@@ -1610,6 +1663,19 @@ PR_LABEL = {
     27: "单日最多活动时间", 28: "卧推最大重量", 29: "推举最大重量", 30: "深蹲最大重量",
     31: "硬拉最大重量", 32: "划船最大重量",
 }
+def _pr_sport(p: dict, meta: dict) -> str:
+    """个人纪录的 activityType 在不同接口/站点可能是字符串或对象，统一取 key。"""
+    at = p.get("activityType")
+    if isinstance(at, dict):
+        at = at.get("typeKey") or at.get("sportTypeKey") or ""
+    at = str(at or "").strip().lower()
+    if at:
+        return _type_cn(at)
+    sp = str((meta or {}).get("sport") or "").strip()
+    low = sp.lower()
+    return _type_cn(low) if low else sp or "未知"
+
+
 PR_TIME_TYPES = {1, 2, 3, 4, 5, 6, 11, 18, 19, 20, 21, 22, 23, 24, 25, 26}
 
 
@@ -1643,7 +1709,7 @@ def t_get_personal_records(s: Session, sport: str | None = None) -> dict:
             "日期": (p.get("activityStartDateTimeLocalFormatted")
                      or p.get("actStartDateTimeInGMTFormatted") or "")[:10],
             "活动ID": p.get("activityId"),
-            "运动": _type_cn((p.get("activityType") or "").lower()) or sp,
+            "运动": _pr_sport(p, meta),
         }))
     return {"数量": len(rows), "个人纪录": rows}
 
@@ -2939,6 +3005,8 @@ def _guard(fn):
             raise ToolError(f"该功能在当前站点不可用或数据不存在：{e}") from e
         except GarminError as e:
             raise ToolError(f"Garmin 接口错误：{e}") from e
+        except Exception as e:      # noqa: BLE001 - 兜底，绝不把 traceback 抛给模型
+            raise ToolError(f"内部错误：{type(e).__name__}: {e}") from e
     return wrapper
 
 

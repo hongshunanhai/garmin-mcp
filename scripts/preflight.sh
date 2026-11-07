@@ -24,7 +24,7 @@ fi
 echo "[3/6] 敏感信息"
 # KEEP_COOKIES 里每一种凭据形态都要有对应检测，别只盯 session
 LEAK=0
-if git grep -qE "session=Fe26\.2\*" -- . 2>/dev/null; then
+if git grep -qE "session=Fe26\.2\*" -- . ':(exclude)scripts/preflight.sh' 2>/dev/null; then
   bad "跟踪文件中出现真实会话 Cookie（session=Fe26.2*）"; LEAK=1
 fi
 if git grep -qE "JWT_WEB=eyJ[A-Za-z0-9_-]{20,}" -- . 2>/dev/null; then

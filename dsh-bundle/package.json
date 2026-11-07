@@ -1,0 +1,14 @@
+{
+  "name": "@local/garmin-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "displayName": "Garmin 训练数据",
+  "description": "把 Garmin Connect 的活动、训练状态、睡眠与心率数据接入对话，让 agent 直接分析你的跑步与健康数据。",
+  "exports": {
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["cordis.patch.yml", "locale/*.json", "icon.svg"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

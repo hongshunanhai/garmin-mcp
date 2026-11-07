@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Garmin Training Data",
+    "description": "Connects your Garmin Connect account so the agent can read activities, training status, sleep and heart-rate data."
+  }
+}

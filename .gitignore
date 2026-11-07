@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.bak
+session.json
+charts/
+*.png
+.DS_Store
+.dsh-bundle-local/

@@ -1,0 +1,11 @@
+{
+  "mcp": {
+    "servers": {
+      "garmin": {
+        "command": "/绝对路径/garmin-mcp/.venv/bin/python",
+        "args": ["/绝对路径/garmin-mcp/garmin_mcp.py"],
+        "env": {}
+      }
+    }
+  }
+}

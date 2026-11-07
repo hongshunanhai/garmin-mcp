@@ -1,0 +1,10 @@
+- id: mcp-garmin
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: garmin
+    transport: stdio
+    command: "/绝对路径/garmin-mcp/.venv/bin/python"
+    args:
+      - "/绝对路径/garmin-mcp/garmin_mcp.py"
+    failOnStartupError: false
+    toolCallTimeoutMs: 600000

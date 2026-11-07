@@ -1,0 +1,5 @@
+[mcp_servers.garmin]
+command = "/绝对路径/garmin-mcp/.venv/bin/python"
+args = ["/绝对路径/garmin-mcp/garmin_mcp.py"]
+startup_timeout_sec = 30.0
+tool_timeout_sec = 600.0

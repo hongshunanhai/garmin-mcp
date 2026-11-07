@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Garmin 训练数据",
+    "description": "接入你的 Garmin Connect 账号，让 agent 读取活动记录、训练状态、睡眠与心率数据。"
+  }
+}

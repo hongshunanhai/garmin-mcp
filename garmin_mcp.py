@@ -179,7 +179,15 @@ def save_session(s: Session) -> None:
         "refresh_expires": s.refresh_expires,
         "display_name": s.display_name,
     }, ensure_ascii=False, indent=1).encode("utf-8")
-    fd = os.open(SESSION, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        fd = os.open(SESSION, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except PermissionError as e:
+        raise GarminError(
+            f"无法写入凭据目录 {HOME}（{e}）。"
+            "如果 MCP 进程被沙箱限制，请改在终端里执行一次："
+            "  ./.venv/bin/python garmin_mcp.py login"
+            "（终端不受限），之后 MCP 只读取即可。"
+            "也可以用环境变量 GARMIN_MCP_HOME 指到一个可写目录。") from e
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)

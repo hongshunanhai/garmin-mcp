@@ -122,13 +122,18 @@ python3 -m venv .venv
 
 ```
 python3 garmin_mcp.py login
-  → 起一个独立 Chrome 窗口（自己的 profile，不动你日常浏览器）
-  → 打开 connect.garmin.cn（或 connect.garmin.com）→ 跳转到佳明 SSO 登录页
+  → 先弹一个本地小页面：「你的佳明账号在哪个站点？」
+        [ 佳明中国 ]  connect.garmin.cn   +86 手机号
+        [ Garmin 国际版 ]  connect.garmin.com  邮箱 / 非 +86
+  → 你点一下，随后起一个独立 Chrome 窗口（自己的 profile，不动你日常浏览器）
+  → 打开对应站点的 SSO 登录页（国区是中文页，国际版是英文页）
   → 你自己输 邮箱/手机号 + 密码 + 验证码
   → 工具通过 Chrome DevTools 协议读 HttpOnly Cookie（Storage.getCookies）
   → 顺便读 <meta name="csrf-token">
   → 校验通过后写入 ~/.garmin-mcp/session.json（权限 600）
 ```
+
+第一次调用任意工具时如果没登录，也会走这个流程（选站点 → 登录窗口 → 自动继续刚才那次调用）。
 
 之后：
 
@@ -149,9 +154,10 @@ python3 garmin_mcp.py login
 |---|---|---|
 | 站点 | `connect.garmin.cn` | `connect.garmin.com` |
 | 登录 | `sso.garmin.cn` | `sso.garmin.com` |
-| 命令 | `login` | `login --site=global` |
+| 命令 | `login`（在弹框里选「佳明中国」） | `login`（在弹框里选「Garmin 国际版」） |
+| 跳过选择 | `login --site=cn` | `login --site=global` |
 
-工具会记住你登录的站点，之后所有请求自动走对应的域名。
+工具会记住你登录的站点，之后所有请求自动走对应的域名；换站点用 `logout` 再 `login`。
 
 ---
 

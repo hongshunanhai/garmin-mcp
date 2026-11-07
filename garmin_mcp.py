@@ -30,14 +30,18 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
+import webbrowser
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -468,7 +472,210 @@ def refresh_session(s: Session, force: bool = False) -> bool:
     return got
 
 
-def do_login(site: str = DEFAULT_SITE, timeout_sec: int = 300) -> int:
+
+# --------------------------------------------------------------------------
+# 站点选择（弹一个本地小页面，让用户选国区 / 国际版）
+# --------------------------------------------------------------------------
+PICKER_HTML = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>选择你的佳明站点</title>
+<style>
+:root{--bg:#fbfbfd;--fg:#1d1d1f;--mute:#6e6e73;--line:#e3e3e8;--accent:#007cc3}
+@media (prefers-color-scheme:dark){:root{--bg:#111114;--fg:#e8e8ed;--mute:#9a9aa2;--line:#2a2a30;--accent:#4aa3d8}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+ background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"PingFang SC",system-ui,sans-serif}
+.card{width:min(680px,92vw);padding:38px 40px 34px;border:1px solid var(--line);border-radius:18px}
+h1{margin:0 0 6px;font-size:24px;letter-spacing:-.01em}
+p.sub{margin:0 0 26px;color:var(--mute);font-size:14px}
+.opts{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+button{display:block;width:100%;text-align:left;padding:20px 22px;border-radius:14px;cursor:pointer;
+ border:1.5px solid var(--line);background:transparent;color:var(--fg);font:inherit;transition:.15s}
+button:hover{border-color:var(--accent);transform:translateY(-1px)}
+button b{display:block;font-size:17px;margin-bottom:4px}
+button span{color:var(--mute);font-size:13px}
+.status{margin-top:22px;font-size:14px;color:var(--mute);min-height:22px}
+.status.ok{color:#1f9d3d}.status.err{color:#d03e3e}
+.hide{display:none}
+</style></head><body>
+<div class="card">
+  <h1>你的佳明账号在哪个站点？</h1>
+  <p class="sub">两个站点的数据互不相通，选错了会看不到数据。登录后会记住这个选择。</p>
+  <div class="opts" id="opts">
+    <button onclick="pick('cn')"><b>佳明中国</b><span>connect.garmin.cn<br>国区账号（+86 手机号）</span></button>
+    <button onclick="pick('global')"><b>Garmin 国际版</b><span>connect.garmin.com<br>国际账号（邮箱 / 非 +86）</span></button>
+  </div>
+  <div class="status" id="st">点上面任意一个，随后会弹出一个登录窗口</div>
+</div>
+<script>
+let site = null;
+async function pick(s){
+  site = s;
+  document.getElementById('opts').classList.add('hide');
+  const st = document.getElementById('st');
+  st.className = 'status';
+  st.textContent = '正在打开登录窗口…';
+  try { await fetch('/pick', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({site:s})}); }
+  catch(e) { st.className='status err'; st.textContent='本页面与工具断开了，请回终端重试'; return; }
+  poll();
+}
+async function poll(){
+  const st = document.getElementById('st');
+  try {
+    const r = await fetch('/status'); const d = await r.json();
+    if (d.phase === 'login') { st.textContent = '已打开登录窗口，请在新窗口里完成登录（勾上 Remember Me 更稳）…'; }
+    else if (d.phase === 'ok') { st.className='status ok'; st.textContent = '✅ 登录成功，可以关闭这个页面了'; return; }
+    else if (d.phase === 'error') { st.className='status err'; st.textContent = '❌ ' + (d.message||'登录未完成，请回终端重试'); return; }
+  } catch(e) {}
+  setTimeout(poll, 1200);
+}
+</script></body></html>"""
+
+
+_LAST_PICKER_URL = ""
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class _PickState:
+    def __init__(self):
+        self.site = None
+        self.phase = "choose"      # choose -> login -> ok / error
+        self.message = ""
+        self.done = threading.Event()
+
+
+@dataclass
+class _Picker:
+    site: str
+    state: _PickState
+    httpd: ThreadingHTTPServer
+
+    def set(self, phase: str, message: str = ""):
+        self.state.phase = phase
+        self.state.message = message
+
+    def close(self, delay: float = 0.0):
+        def _stop():
+            try:
+                if delay:
+                    time.sleep(delay)
+                self.httpd.shutdown()
+            except Exception:
+                pass
+        threading.Thread(target=_stop, daemon=True).start()
+
+
+def _make_picker_handler(state: _PickState):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):   # 静默访问日志，别污染 stdio
+            pass
+
+        def _send(self, code: int, ctype: str, body: str):
+            data = body.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except Exception:
+                pass
+
+        def do_GET(self):
+            if self.path.startswith("/status"):
+                self._send(200, "application/json", json.dumps(
+                    {"phase": state.phase, "site": state.site, "message": state.message},
+                    ensure_ascii=False))
+            else:
+                self._send(200, "text/html; charset=utf-8", PICKER_HTML)
+
+        def do_POST(self):
+            if not self.path.startswith("/pick"):
+                self._send(404, "text/plain", "not found")
+                return
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                payload = {}
+            site = str(payload.get("site") or "").lower()
+            if site not in SITES:
+                self._send(400, "application/json", '{"ok":false}')
+                return
+            state.site = site
+            state.phase = "login"
+            self._send(200, "application/json", '{"ok":true}')
+            state.done.set()
+    return Handler
+
+
+def _pick_site(timeout: float = 180.0) -> _Picker | None:
+    """弹本地页面让用户选国区 / 国际版；超时或起不来返回 None。"""
+    state = _PickState()
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", _free_port()), _make_picker_handler(state))
+    except OSError:
+        return None
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{httpd.server_port}/"
+    global _LAST_PICKER_URL
+    _LAST_PICKER_URL = url
+    print(f"🌐 已打开「选择站点」页面：{url}", file=sys.stderr)
+    try:
+        webbrowser.open(url, new=1, autoraise=True)
+    except Exception:
+        print(f"   浏览器没有自动打开，请手动访问上面的地址", file=sys.stderr)
+    if not state.done.wait(timeout) or not state.site:
+        httpd.shutdown()
+        return None
+    return _Picker(site=state.site, state=state, httpd=httpd)
+
+
+def _prompt_site_cli() -> str:
+    """没有图形界面时的兜底：终端里问一下。"""
+    print("\n请选择你的佳明站点：", file=sys.stderr)
+    print("  1) 佳明中国   connect.garmin.cn（默认）", file=sys.stderr)
+    print("  2) Garmin 国际版  connect.garmin.com", file=sys.stderr)
+    try:
+        ans = input("输入 1 或 2（直接回车 = 1）: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return DEFAULT_SITE
+    return "global" if ans == "2" else DEFAULT_SITE
+
+
+def do_login(site: str | None = None, timeout_sec: int = 300) -> int:
+    """登录入口。site=None 时先弹「选择站点」页面（国区 / 国际版），再打开对应登录页。"""
+    picker = None
+    if not site:
+        picker = _pick_site()
+        if picker is None:
+            site = _prompt_site_cli()
+        else:
+            site = picker.site
+    site = site if site in SITES else DEFAULT_SITE
+    if picker:
+        picker.set("login", f"已选择 {SITES[site]['label']}")
+    try:
+        rc = _do_login_impl(site, timeout_sec)
+        if picker:
+            picker.set("ok" if rc == 0 else "error",
+                       "登录成功" if rc == 0 else "登录未完成")
+            picker.close(delay=8)
+        return rc
+    except Exception as e:
+        if picker:
+            picker.set("error", str(e)[:140])
+            picker.close(delay=8)
+        raise
+
+
+def _do_login_impl(site: str, timeout_sec: int = 300) -> int:
     """拉起独立 Chrome 窗口，等用户登录完成后自动保存 Cookie。"""
     site = site if site in SITES else DEFAULT_SITE
     cfg = SITES[site]
@@ -497,17 +704,26 @@ def do_login(site: str = DEFAULT_SITE, timeout_sec: int = 300) -> int:
         "--no-default-browser-check",
         "--disable-blink-features=AutomationControlled",
         "--disable-features=Translate,MediaRouter",
+        f"--lang={cfg['locale']}",
         "--window-size=1020,820",
-        "about:blank",
     ]
+    # 高级用法：某些环境（CI / 容器 / root）需要额外参数，如 --no-sandbox
+    extra = os.environ.get("GARMIN_CHROME_FLAGS", "").split()
+    args += extra + ["about:blank"]
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     cdp = None
     try:
         port, path = _read_devtools_port(profile)
         cdp = CDP(f"ws://127.0.0.1:{port}{path}")
         cdp.attach_first_page()
-        cdp.send("Page.enable")
-        cdp.send("Page.navigate", {"url": f"{cfg['base']}/app/home"})
+        # 直接落到对应语言的新版 SSO 门户（否则会按浏览器语言猜，中文用户会看到英文页）
+        signin = (f"{cfg['sso']}/portal/sso/{cfg['locale']}/sign-in?clientId=GarminConnect"
+                  f"&service={urllib.parse.quote(cfg['base'] + '/app/home', safe='')}")
+        try:
+            cdp.send("Page.enable")
+            cdp.send("Page.navigate", {"url": signin})
+        except Exception as e:
+            raise GarminError(f"打开登录页失败：{e}")
 
         print(f"🌐 已打开 {cfg['label']} 登录窗口，请在窗口里完成登录（邮箱/手机号 + 密码 + 验证码）")
         print("   登录成功后窗口会自动关闭，无需手动操作…")
@@ -619,8 +835,8 @@ def ensure_session(interactive: bool = True) -> Session:
     if s is None:
         if not interactive:
             raise AuthRequired()
-        print("未检测到登录凭据，正在打开登录窗口…", file=sys.stderr)
-        do_login(DEFAULT_SITE)
+        print("未检测到登录凭据，正在打开站点选择…", file=sys.stderr)
+        do_login(None)
         s = load_session()
         if s is None:
             raise AuthRequired()
@@ -1700,9 +1916,10 @@ def build_server():
         return MCPImage(data=png, format="png")
 
     @mcp.tool(name="login", description=(
-        "打开佳明登录窗口。用户说「登录佳明」，或任何工具返回未登录时调用。"
-        "会弹出一个独立的 Chrome 窗口，用户在里面正常登录（邮箱/手机号+密码+验证码），"
-        "登录成功后窗口自动关闭并保存凭据。site 可选 cn（默认，国区）或 global（国际版）。"))
+        "登录佳明。用户说「登录佳明」，或任何工具返回未登录时调用。"
+        "会先弹一个网页让用户选「佳明中国 / Garmin 国际版」，再打开对应站点的登录窗口；"
+        "用户在里面正常登录（邮箱/手机号+密码+验证码），登录成功后窗口自动关闭并保存凭据。"
+        "已知站点时可直接传 site=cn 或 site=global 跳过选择。"))
     @_guard
     def login(site: str | None = None) -> str:
         import contextlib
@@ -1753,14 +1970,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cmd = argv[0]
-    site = DEFAULT_SITE
+    site: str | None = None
     for a in argv:
         if a.startswith("--site="):
-            site = a.split("=", 1)[1].strip().lower()
+            site = a.split("=", 1)[1].strip().lower() or None
     try:
         if cmd == "login":
             if "--manual" in argv:
-                return do_login_manual(site)
+                return do_login_manual(site or DEFAULT_SITE)
             return do_login(site)
         if cmd == "logout":
             clear_session()

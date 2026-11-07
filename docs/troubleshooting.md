@@ -16,12 +16,13 @@
 
 两种办法：
 
-- 在对话里说「登录佳明」→ 调用 `login` 工具弹窗
+- 在对话里说「登录佳明」→ 调用 `login` 工具：**先弹网页选国区/国际版，再打开登录窗口**
 - 或终端执行：
 
 ```bash
-./.venv/bin/python garmin_mcp.py login            # 国区
-./.venv/bin/python garmin_mcp.py login --site=global   # 国际版
+./.venv/bin/python garmin_mcp.py login              # 弹框里选站点
+./.venv/bin/python garmin_mcp.py login --site=cn       # 直接国区
+./.venv/bin/python garmin_mcp.py login --site=global   # 直接国际版
 ```
 
 ## 登录窗口打不开 / 一闪而过

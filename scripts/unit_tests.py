@@ -123,6 +123,60 @@ def test_compact():
     check("保留 0 与 False", G.compact({"a": 0, "b": False}) == {"a": 0, "b": False})
 
 
+def test_picker():
+    print("站点选择页")
+    import json as _json
+    import threading
+    import time as _time
+    import urllib.request
+
+    saved_open = G.webbrowser.open
+    G.webbrowser.open = lambda *a, **k: True
+    try:
+        box = {}
+        th = threading.Thread(target=lambda: box.setdefault("p", G._pick_site(timeout=8)))
+        th.start()
+        for _ in range(50):
+            if G._LAST_PICKER_URL:
+                break
+            _time.sleep(0.1)
+        url = G._LAST_PICKER_URL
+        check("弹出了选择页", bool(url))
+        if not url:
+            return
+        with urllib.request.urlopen(url, timeout=5) as r:
+            html = r.read().decode()
+        check("页面有两个选项", "佳明中国" in html and "Garmin 国际版" in html)
+        with urllib.request.urlopen(url + "status", timeout=5) as r:
+            st = _json.loads(r.read())
+        check("初始状态是 choose", st.get("phase") == "choose", st)
+
+        # 非法站点应被拒绝
+        bad = urllib.request.Request(url + "pick", data=b'{"site":"mars"}', method="POST",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(bad, timeout=5)
+            check("非法站点被拒绝", False)
+        except Exception as e:
+            check("非法站点被拒绝", "400" in str(e), str(e))
+
+        ok = urllib.request.Request(url + "pick", data=b'{"site":"global"}', method="POST",
+                                    headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(ok, timeout=5) as r:
+            check("选择成功", _json.loads(r.read()).get("ok") is True)
+        th.join(timeout=5)
+        p = box.get("p")
+        check("返回的站点正确", getattr(p, "site", None) == "global", getattr(p, "site", None))
+        check("进入 login 阶段", getattr(p, "state", None) and p.state.phase == "login")
+        p.set("ok", "登录成功")
+        with urllib.request.urlopen(url + "status", timeout=5) as r:
+            st = _json.loads(r.read())
+        check("状态可回传 ok", st.get("phase") == "ok", st)
+        p.close()
+    finally:
+        G.webbrowser.open = saved_open
+
+
 def test_pr_labels():
     print("个人纪录标签")
     check("5K 有时间型", 3 in G.PR_TIME_TYPES)
@@ -132,7 +186,7 @@ def test_pr_labels():
 
 if __name__ == "__main__":
     for fn in (test_pace, test_sport, test_period, test_cookie_parse,
-               test_csrf, test_session, test_compact, test_pr_labels):
+               test_csrf, test_session, test_compact, test_picker, test_pr_labels):
         fn()
     print()
     if FAILS:

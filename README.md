@@ -168,7 +168,7 @@ python3 garmin_mcp.py login
 
 ---
 
-## 提供的工具（17 个，全部只读）
+## 提供的工具（21 个；默认只读，写操作需显式开启）
 
 **核心数据**
 
@@ -207,7 +207,55 @@ python3 garmin_mcp.py login
 | `download_activity` | 导出原始文件（fit / gpx / tcx / kml / csv）到本机，返回路径 |
 | `login` | 选站点 + 打开登录窗口（用户说「登录佳明」时调用） |
 
-明确**没有**封装：上传 FIT、删除活动、改标题、发评论等一切写操作。
+**写操作（默认关闭，见下一节）**
+
+| 工具 | 作用 |
+|---|---|
+| `create_workout` | 创建跑步/骑行/游泳课表（对应网页「训练课程 → 创建训练」） |
+| `schedule_workout` | 把课表排到某一天 |
+| `push_workout_to_device` | 「发送到设备」（手表下次同步即收到） |
+| `delete_workout` | 删除课表（用于撤销建错的） |
+
+明确**没有**封装：上传 FIT、删除活动、改标题、发评论等其它写操作。
+
+---
+
+## 创建课表并推到手表（可选，默认关闭）
+
+这个能力会**修改你的账号数据**，所以默认关闭，必须显式开启：
+
+```bash
+export GARMIN_ALLOW_WRITE=1        # 或在客户端配置的 env 里加
+```
+
+每个写工具都**默认 dry-run**（只返回将提交的 JSON 和人话预览），要真正执行必须再传 `confirm=true`。
+
+**完整链路**（以「4×800 米间歇」为例）：
+
+```
+1) create_workout  → 预览
+   {"name":"800米间歇 4组","steps":[
+      {"type":"warmup","duration_min":10},
+      {"type":"repeat","times":4,"steps":[
+         {"type":"interval","distance_m":800,"pace":"5:00"},
+         {"type":"recovery","duration_min":2}]},
+      {"type":"cooldown","duration_min":10}]}
+   →  热身 10 分钟 / 重复 4 组: 快跑 800 米 @ 4'54"-5'04" / 慢跑恢复 2 分钟 / 缓和 10 分钟
+
+2) 确认后 create_workout 加 confirm=true → 返回 workout_id
+
+3) schedule_workout(workout_id, "2026-11-10", confirm=true)   排到下周二
+
+4) push_workout_to_device(confirm=true)                       发送到设备
+   → 手表下次和手机同步时收到这节课
+```
+
+支持的目标：`pace`（分:秒，自动给 ±5 秒区间）、`pace_range`、`hr_zone`（心率区）。
+支持的运动：`run` / `bike` / `swim`。
+
+> ⚠️ 两点务必知道：
+> 1. **写接口我只在网页代码里见过，没在你账号上真调过**（为了不污染数据）。第一次请先 dry-run 看 JSON，再用 `confirm=true` 建一节测试课表，确认手表上显示正常后删掉。
+> 2. 课表一旦排期并下发，**手表会按它提示你训练**；建错请立刻 `delete_workout`。
 
 ---
 

@@ -1576,6 +1576,241 @@ def _pick(d: dict, *keys, default=None):
     return default
 
 
+# ==========================================================================
+# 写操作：创建课表 / 排期 / 下发到设备（默认关闭）
+# ==========================================================================
+WORKOUT_SPORTS = {
+    "run": {"sportTypeId": 1, "sportTypeKey": "running"},
+    "running": {"sportTypeId": 1, "sportTypeKey": "running"},
+    "bike": {"sportTypeId": 2, "sportTypeKey": "cycling"},
+    "ride": {"sportTypeId": 2, "sportTypeKey": "cycling"},
+    "swim": {"sportTypeId": 5, "sportTypeKey": "swimming"},
+}
+STEP_TYPES = {
+    "warmup": {"stepTypeId": 1, "stepTypeKey": "warmup"},
+    "cooldown": {"stepTypeId": 2, "stepTypeKey": "cooldown"},
+    "interval": {"stepTypeId": 3, "stepTypeKey": "interval"},
+    "recovery": {"stepTypeId": 4, "stepTypeKey": "recovery"},
+    "rest": {"stepTypeId": 5, "stepTypeKey": "rest"},
+}
+COND_TIME = {"conditionTypeId": 2, "conditionTypeKey": "time"}
+COND_DIST = {"conditionTypeId": 3, "conditionTypeKey": "distance"}
+TARGET_NONE = {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target"}
+TARGET_PACE = {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone"}
+TARGET_HR = {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone"}
+
+
+def _require_write() -> None:
+    if os.environ.get("GARMIN_ALLOW_WRITE", "").strip() not in ("1", "true", "yes"):
+        raise GarminError(
+            "写操作未开启。本工具默认只读；要创建课表/排期/下发到设备，"
+            "请设置环境变量 GARMIN_ALLOW_WRITE=1 后重启客户端。")
+
+
+def _pace_sec(text: str) -> int:
+    """'5:00' / "5'00\"" / '300' → 秒/公里。"""
+    t = str(text).strip().replace('"', "").replace("'", ":").replace("’", ":")
+    try:
+        if ":" in t:
+            m, _, sec = t.partition(":")
+            total = int(m) * 60 + int(sec or 0)
+        else:
+            total = int(float(t))
+    except Exception:
+        raise GarminError(f"配速格式不对：{text}（要 5:00 这种 分:秒）")
+    if total <= 0:
+        raise GarminError(f"配速必须大于 0：{text}")
+    return total
+
+
+def _pace_bounds(spec) -> tuple[float, float]:
+    """单个配速或 [慢, 快] → (慢端 m/s, 快端 m/s)；单值时自动给 ±5 秒区间。"""
+    if isinstance(spec, (list, tuple)) and len(spec) == 2:
+        a, b = _pace_sec(spec[0]), _pace_sec(spec[1])
+        slow_sec, fast_sec = max(a, b), min(a, b)
+    else:
+        sec = _pace_sec(spec)
+        slow_sec, fast_sec = sec + 5, max(60, sec - 5)
+    return round(1000.0 / slow_sec, 6), round(1000.0 / fast_sec, 6)
+
+
+def _step(step: dict, order: int, sport: dict) -> dict:
+    """把一步 DSL 编译成 Garmin 的 ExecutableStepDTO。"""
+    kind = str(step.get("type") or "interval").lower()
+    st = STEP_TYPES.get(kind)
+    if not st:
+        raise GarminError(f"step.type 只支持 {list(STEP_TYPES)}，收到 {kind}")
+
+    if step.get("distance_m"):
+        cond, val = COND_DIST, float(step["distance_m"])
+    elif step.get("duration_min"):
+        cond, val = COND_TIME, float(step["duration_min"]) * 60.0
+    elif step.get("duration_sec"):
+        cond, val = COND_TIME, float(step["duration_sec"])
+    else:
+        raise GarminError(f"第 {order} 步缺少时长或距离（duration_min / distance_m）")
+
+    target, t1, t2, zone = TARGET_NONE, None, None, None
+    if step.get("hr_zone"):
+        target, zone = TARGET_HR, int(step["hr_zone"])
+    elif step.get("pace"):
+        target = TARGET_PACE
+        t1, t2 = _pace_bounds(step["pace"])
+    elif step.get("pace_range"):
+        target = TARGET_PACE
+        t1, t2 = _pace_bounds(step["pace_range"])
+
+    return {
+        "type": "ExecutableStepDTO",
+        "stepOrder": order,
+        "stepType": st,
+        "description": step.get("note"),
+        "endCondition": cond,
+        "endConditionValue": val,
+        "targetType": target,
+        "targetValueOne": t1,
+        "targetValueTwo": t2,
+        "zoneNumber": zone,
+        "secondaryTargetType": None,
+        "secondaryTargetValueOne": None,
+        "secondaryTargetValueTwo": None,
+        "secondaryZoneNumber": None,
+    }
+
+
+def build_workout(name: str, steps: list, sport: str = "run",
+                  description: str | None = None) -> dict:
+    """把结构化步骤编译成 Garmin 课表 JSON（不提交，纯本地）。"""
+    sp = WORKOUT_SPORTS.get(str(sport).lower())
+    if not sp:
+        raise GarminError(f"sport 只支持 {sorted(set(WORKOUT_SPORTS))}，收到 {sport}")
+    if not steps:
+        raise GarminError("steps 不能为空")
+
+    compiled = []
+    order = 0
+    for raw in steps:
+        order += 1
+        if str(raw.get("type", "")).lower() == "repeat":
+            times = int(raw["times"]) if "times" in raw else 1
+            if times < 1:
+                raise GarminError("repeat.times 必须 >= 1")
+            children = [ _step(ch, i + 1, sp) for i, ch in enumerate(raw.get("steps") or []) ]
+            if not children:
+                raise GarminError("repeat.steps 不能为空")
+            compiled.append({
+                "type": "RepeatGroupDTO",
+                "stepOrder": order,
+                "numberOfIterations": times,
+                "smartRepeat": False,
+                "workoutSteps": children,
+            })
+        else:
+            compiled.append(_step(raw, order, sp))
+
+    return {
+        "workoutName": name,
+        "description": description,
+        "sportType": sp,
+        "workoutSegments": [{
+            "segmentOrder": 1,
+            "sportType": sp,
+            "workoutSteps": compiled,
+        }],
+    }
+
+
+def _workout_summary(payload: dict) -> list:
+    """把编译好的课表翻译成人话，方便 dry-run 预览。"""
+    out = []
+
+    names = {"warmup": "热身", "cooldown": "缓和", "interval": "快跑",
+             "recovery": "慢跑恢复", "rest": "休息"}
+
+    def fmt(step, indent=""):
+        st = (step.get("stepType") or {}).get("stepTypeKey")
+        ck = (step.get("endCondition") or {}).get("conditionTypeKey")
+        v = step.get("endConditionValue")
+        amount = (f"{v:.0f} 米" if ck == "distance" and v < 1000
+                  else f"{v / 1000:.2f} 公里" if ck == "distance"
+                  else f"{v / 60:.0f} 分钟")
+        tt = (step.get("targetType") or {}).get("workoutTargetTypeKey")
+        extra = ""
+        if tt == "pace.zone" and step.get("targetValueOne"):
+            lo, hi = step["targetValueOne"], step["targetValueTwo"]
+            p1 = 1000.0 / hi if hi else 0
+            p2 = 1000.0 / lo if lo else 0
+            extra = f" @ {int(p1) // 60}'{int(p1) % 60:02d}\"-{int(p2) // 60}'{int(p2) % 60:02d}\""
+        elif tt == "heart.rate.zone":
+            extra = f" @ 心率{step.get('zoneNumber')}区"
+        out.append(f"{indent}{names.get(st, st)} {amount}{extra}")
+
+    for step in payload["workoutSegments"][0]["workoutSteps"]:
+        if step.get("type") == "RepeatGroupDTO":
+            out.append(f"  重复 {step['numberOfIterations']} 组：")
+            for ch in step["workoutSteps"]:
+                fmt(ch, "    ")
+        else:
+            fmt(step)
+    return out
+
+
+def t_create_workout(s: Session, name: str, steps: list, sport: str = "run",
+                     description: str | None = None, confirm: bool = False) -> dict:
+    payload = build_workout(name, steps, sport, description)
+    if not confirm:
+        return {
+            "dry_run": True,
+            "说明": "还没提交。确认无误后加 confirm=true 再调用一次",
+            "课表": payload,
+            "预览": _workout_summary(payload),
+        }
+    _require_write()
+    r = _check(s, _request(s, "POST", "/gc-api/workout-service/workout",
+                           body=json.dumps(payload).encode(),
+                           headers={"Content-Type": "application/json"}), "创建课表")
+    data = r.json() if r.text.strip() else {}
+    return {
+        "ok": True,
+        "workout_id": data.get("workoutId"),
+        "名称": data.get("workoutName") or name,
+        "预览": _workout_summary(payload),
+        "下一步": f"用 schedule_workout 把它排到某天（workout_id={data.get('workoutId')}）",
+    }
+
+
+def t_schedule_workout(s: Session, workout_id: str, day: str, confirm: bool = False) -> dict:
+    try:
+        date.fromisoformat(day)
+    except Exception:
+        raise GarminError(f"day 要 YYYY-MM-DD，收到 {day}")
+    if not confirm:
+        return {"dry_run": True, "说明": f"将把课表 {workout_id} 排到 {day}；确认后加 confirm=true"}
+    _require_write()
+    body = json.dumps({"calendarDate": day}).encode()
+    r = _check(s, _request(s, "POST", f"/gc-api/workout-service/schedule/{workout_id}",
+                           body=body, headers={"Content-Type": "application/json"}), "排期")
+    return {"ok": True, "workout_id": workout_id, "日期": day,
+            "schedule_id": (r.json() if r.text.strip() else {}).get("workoutScheduleId")}
+
+
+def t_push_to_device(s: Session, confirm: bool = False) -> dict:
+    if not confirm:
+        return {"dry_run": True, "说明": "将把已排期的课表标记为「发送到设备」；确认后加 confirm=true"}
+    _require_write()
+    _check(s, _request(s, "PUT", "/gc-api/workout-service/schedule/sendtodevices",
+                       body=b"", headers={"Content-Type": "application/json"}), "下发到设备")
+    return {"ok": True, "说明": "已发送到设备；手表下次与手机同步时会收到课表"}
+
+
+def t_delete_workout(s: Session, workout_id: str, confirm: bool = False) -> dict:
+    if not confirm:
+        return {"dry_run": True, "说明": f"将删除课表 {workout_id}；确认后加 confirm=true"}
+    _require_write()
+    _check(s, _request(s, "DELETE", f"/gc-api/workout-service/workout/{workout_id}"), "删除课表")
+    return {"ok": True, "deleted": workout_id}
+
+
 def t_get_calendar(s: Session, month: str | None = None) -> dict:
     """月历：每天的活动 + 训练/赛事事件。month 形如 2026-11，缺省本月。"""
     if month and len(month) == 7 and "-" in month:
@@ -2337,6 +2572,45 @@ def build_server():
     def download_activity(activity_id: str, fmt: str = "fit") -> str:
         return _out(t_download_activity(ensure_session(), activity_id, fmt))
 
+    @mcp.tool(description=(
+        "【写操作，需 GARMIN_ALLOW_WRITE=1】创建跑步/骑行/游泳课表（对应网页「训练课程 → 创建训练」）。"
+        "steps 是结构化步骤数组，例如："
+        '[{"type":"warmup","duration_min":10},'
+        ' {"type":"repeat","times":4,"steps":[{"type":"interval","distance_m":800,"pace":"5:00"},'
+        '                                     {"type":"recovery","duration_min":2}]},'
+        ' {"type":"cooldown","duration_min":10}]。'
+        "step.type 支持 warmup/interval/recovery/cooldown/rest；"
+        "时长用 duration_min，距离用 distance_m，目标用 pace（分:秒）或 pace_range 或 hr_zone。"
+        "默认只做 dry-run 返回将提交的 JSON 与人话预览；确认后再传 confirm=true 才真正创建。"))
+    @_guard
+    def create_workout(name: str, steps: list, sport: str = "run",
+                       description: str | None = None, confirm: bool = False) -> str:
+        # 预览不需要登录；只有真正提交时才要会话
+        return _out(t_create_workout(ensure_session() if confirm else load_session(),
+                                     name, steps, sport, description, confirm))
+
+    @mcp.tool(description=(
+        "【写操作，需 GARMIN_ALLOW_WRITE=1】把课表排到某一天（day=YYYY-MM-DD），"
+        "排期后手表同步时会看到这节课。默认 dry-run，confirm=true 才执行。"))
+    @_guard
+    def schedule_workout(workout_id: str, day: str, confirm: bool = False) -> str:
+        return _out(t_schedule_workout(ensure_session() if confirm else load_session(),
+                                       workout_id, day, confirm))
+
+    @mcp.tool(description=(
+        "【写操作，需 GARMIN_ALLOW_WRITE=1】把所有待发课表「发送到设备」"
+        "（等价于网页上的发送到设备按钮）；手表下次同步即收到。默认 dry-run。"))
+    @_guard
+    def push_workout_to_device(confirm: bool = False) -> str:
+        return _out(t_push_to_device(ensure_session() if confirm else load_session(), confirm))
+
+    @mcp.tool(description=(
+        "【写操作，需 GARMIN_ALLOW_WRITE=1】删除一个课表（用于撤销建错的课表）。默认 dry-run。"))
+    @_guard
+    def delete_workout(workout_id: str, confirm: bool = False) -> str:
+        return _out(t_delete_workout(ensure_session() if confirm else load_session(),
+                                     workout_id, confirm))
+
     @mcp.tool(name="render_chart", description=(
         "把数据画成图，直接以图片返回（不需要任何外部工具）。"
         "kind='activity' 画单次活动的每公里配速+心率+心率区间（需 activity_id）；"
@@ -2452,11 +2726,20 @@ def main(argv: list[str] | None = None) -> int:
                 "get_social": t_get_social,
                 "get_devices": t_get_devices,
                 "download_activity": t_download_activity,
+                "create_workout": t_create_workout,
+                "schedule_workout": t_schedule_workout,
+                "push_workout_to_device": t_push_to_device,
+                "delete_workout": t_delete_workout,
             }.get(tool)
             if not fn:
                 print(f"未知工具: {tool}")
                 return 1
-            s = ensure_session()
+            write_tools = {"create_workout", "schedule_workout",
+                           "push_workout_to_device", "delete_workout"}
+            if tool in write_tools and not args.get("confirm"):
+                s = load_session()          # 预览不需要登录
+            else:
+                s = ensure_session()
             print(json.dumps(compact(fn(s, **args)), ensure_ascii=False, indent=1))
             return 0
         if cmd in ("chart", "render_chart"):

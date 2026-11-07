@@ -238,6 +238,73 @@ def test_download():
         G._request, G.HOME, G._check = old_req, old_home, old_check
 
 
+def test_workout_builder():
+    print("课表编译")
+    steps = [
+        {"type": "warmup", "duration_min": 10},
+        {"type": "repeat", "times": 4, "steps": [
+            {"type": "interval", "distance_m": 800, "pace": "5:00"},
+            {"type": "recovery", "duration_min": 2},
+        ]},
+        {"type": "cooldown", "duration_min": 10},
+    ]
+    w = G.build_workout("800米间歇", steps)
+    top = w["workoutSegments"][0]["workoutSteps"]
+    check("顶层三步", len(top) == 3, len(top))
+    check("第 1 步是热身", top[0]["stepType"]["stepTypeKey"] == "warmup")
+    check("热身 600 秒", top[0]["endConditionValue"] == 600.0, top[0]["endConditionValue"])
+    rep = top[1]
+    check("第 2 步是重复组", rep["type"] == "RepeatGroupDTO")
+    check("重复 4 次", rep["numberOfIterations"] == 4)
+    check("组内两步", len(rep["workoutSteps"]) == 2)
+    interval = rep["workoutSteps"][0]
+    check("间歇 800 米", interval["endConditionValue"] == 800.0)
+    check("按配速", interval["targetType"]["workoutTargetTypeKey"] == "pace.zone")
+    check("速度下界小于上界", interval["targetValueOne"] < interval["targetValueTwo"])
+    check("stepOrder 连续", [s["stepOrder"] for s in top] == [1, 2, 3])
+
+    summary = G._workout_summary(w)
+    check("预览是中文", any("热身" in x for x in summary) and any("重复 4 组" in x for x in summary), summary)
+
+    for name, fn in [
+        ("空 steps", lambda: G.build_workout("x", [])),
+        ("缺时长", lambda: G.build_workout("x", [{"type": "interval"}])),
+        ("不支持的运动", lambda: G.build_workout("x", [{"type": "interval", "duration_min": 5}], sport="rowing")),
+        ("次数为 0", lambda: G.build_workout("x", [{"type": "repeat", "times": 0, "steps": [{"type": "interval", "duration_min": 1}]}])),
+        ("配速格式错", lambda: G.build_workout("x", [{"type": "interval", "duration_min": 5, "pace": "abc"}])),
+    ]:
+        raised = False
+        try:
+            fn()
+        except G.GarminError:
+            raised = True
+        check(f"{name} 报错", raised)
+
+
+def test_write_gate():
+    print("写操作开关")
+    import os as _os
+    old = _os.environ.pop("GARMIN_ALLOW_WRITE", None)
+    try:
+        raised = False
+        try:
+            G._require_write()
+        except G.GarminError:
+            raised = True
+        check("默认关闭", raised)
+        _os.environ["GARMIN_ALLOW_WRITE"] = "1"
+        ok = True
+        try:
+            G._require_write()
+        except G.GarminError:
+            ok = False
+        check("设 1 后放行", ok)
+    finally:
+        _os.environ.pop("GARMIN_ALLOW_WRITE", None)
+        if old is not None:
+            _os.environ["GARMIN_ALLOW_WRITE"] = old
+
+
 def test_pr_labels():
     print("个人纪录标签")
     check("5K 有时间型", 3 in G.PR_TIME_TYPES)
@@ -248,7 +315,8 @@ def test_pr_labels():
 if __name__ == "__main__":
     for fn in (test_pace, test_sport, test_period, test_cookie_parse,
                test_csrf, test_session, test_compact, test_picker,
-               test_weight_date, test_download, test_pr_labels):
+               test_weight_date, test_download, test_workout_builder,
+               test_write_gate, test_pr_labels):
         fn()
     print()
     if FAILS:

@@ -153,4 +153,5 @@ Delete either to log out.
 
 ## License
 
-MIT. Not affiliated with Garmin.
+[PolyForm Noncommercial License 1.0.0](LICENSE) — noncommercial use only.
+Not affiliated with Garmin.

@@ -483,4 +483,4 @@ bash -n install.sh                           # 安装脚本语法
 
 ## License
 
-MIT
+[PolyForm Noncommercial License 1.0.0](LICENSE) —— 仅限非商业使用，详见上方「许可证」章节。

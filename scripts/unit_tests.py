@@ -450,6 +450,44 @@ def test_pr_sport():
     check("都没有不崩", G._pr_sport({}, {}) == "未知")
 
 
+def test_http_status_mapping():
+    print("HTTP 状态映射")
+    s = G.Session(site="cn", cookies={"session": "x"}, csrf="c")
+
+    def resp(status, location=""):
+        return G._Resp(status, "", [], "application/json", location)
+
+    # 302 到 SSO 才算掉登录
+    raised = False
+    try:
+        G._check(s, resp(302, "https://sso.garmin.cn/portal/sso/zh-CN/sign-in?x=1"))
+    except G.AuthRequired:
+        raised = True
+    check("302 -> sso 视为过期", raised)
+
+    raised = False
+    try:
+        G._check(s, resp(302, "https://connect.garmin.cn/app/home"))
+    except G.GarminError as e:
+        raised = "跳转" in str(e)
+    check("302 -> 普通地址当错误透出", raised)
+
+    check("204 不抛错", G._check(s, resp(204)) is not None)
+    raised = False
+    try:
+        G._check(s, resp(404))
+    except G.NotFound:
+        raised = True
+    check("404 -> NotFound", raised)
+
+
+def test_login_budget():
+    print("登录预算")
+    check("站点选择默认 120s", G._pick_site.__defaults__[0] == 120.0, G._pick_site.__defaults__)
+    check("登录默认 300s", G._do_login_impl.__defaults__[-1] == 300, G._do_login_impl.__defaults__)
+    check("合计 <= 450s", G._pick_site.__defaults__[0] + G._do_login_impl.__defaults__[-1] <= 450)
+
+
 def test_pr_labels():
     print("个人纪录标签")
     check("5K 有时间型", 3 in G.PR_TIME_TYPES)
@@ -463,7 +501,8 @@ if __name__ == "__main__":
                test_weight_date, test_download, test_workout_builder,
                test_editor_roundtrip, test_write_gate, test_session_permissions,
                test_bootstrap_fallback, test_refresh_lock, test_temperature,
-               test_pr_sport, test_pr_labels):
+               test_pr_sport, test_http_status_mapping, test_login_budget,
+               test_pr_labels):
         fn()
     print()
     if FAILS:

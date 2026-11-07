@@ -1313,6 +1313,8 @@ def t_get_training_status(s: Session, days: int = 30) -> dict:
     vo2 = api_soft(s, f"/gc-api/metrics-service/metrics/maxmet/latest/{today}") or {}
     rd = api_soft(s, f"/gc-api/metrics-service/metrics/trainingreadiness/{today}") or []
     hrv = api_soft(s, f"/gc-api/hrv-service/hrv/{today}")
+    pred = api_soft(s, f"/gc-api/metrics-service/metrics/racepredictions/latest/{dn}") or {}
+    lt = api_soft(s, "/gc-api/biometric-service/biometric/latestLactateThreshold") or []
     start = (_today() - timedelta(days=max(7, int(days)))).isoformat()
     weekly = api_soft(s, f"/gc-api/metrics-service/metrics/trainingstatus/weekly/{dn}",
                       fromCalendarDate=start, toCalendarDate=today) or {}
@@ -1333,7 +1335,9 @@ def t_get_training_status(s: Session, days: int = 30) -> dict:
 
     series = []
     for dev_id, items in ((weekly.get("reportData") or {})).items():
-        for it in (items or [])[-int(days):]:
+        for it in (items or []):
+            if (it.get("calendarDate") or "") < start:
+                continue
             series.append(compact({
                 "日期": it.get("calendarDate"),
                 "状态": it.get("trainingStatusFeedbackPhrase"),
@@ -1381,11 +1385,46 @@ def t_get_training_status(s: Session, days: int = 30) -> dict:
             "状态": (hrv or {}).get("status") if isinstance(hrv, dict) else None,
             "夜间均值": (hrv or {}).get("lastNightAvg") if isinstance(hrv, dict) else None,
         }) if hrv else None,
+        "成绩预测": compact({
+            "5K": hms(pred.get("time5K")),
+            "10K": hms(pred.get("time10K")),
+            "半马": hms(pred.get("timeHalfMarathon")),
+            "全马": hms(pred.get("timeMarathon")),
+            "更新": pred.get("calendarDate"),
+        }) if isinstance(pred, dict) and any(pred.get(k) for k in
+                                            ("time5K", "time10K", "timeHalfMarathon", "timeMarathon")) else None,
+        "乳酸阈": compact({
+            "配速": _lt_pace(_pick(lt[0], "speed") if isinstance(lt, list) and lt else None),
+            "心率": _pick(lt[1], "hearRate", "heartRate") if isinstance(lt, list) and len(lt) > 1 else None,
+        }) if isinstance(lt, list) and lt else None,
         "近况": series,
         "说明": None if first else "该账号还没有训练状态数据（需要设备同步过带训练负荷的活动）",
         "解读要点": "训练状态看 trainingStatusFeedbackPhrase；负荷是否均衡看三档 vs 目标区间；"
                     "准备程度低时优先休息或轻松跑",
     })
+
+
+def _lt_pace(v) -> str | None:
+    """乳酸阈速度字段有两种口径：<1 视为 秒/米，>=1 视为 米/秒。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f <= 0:
+        return None
+    sec_per_km = f * 1000.0 if f < 1 else 1000.0 / f
+    m, sec = divmod(int(round(sec_per_km)), 60)
+    return f"{m}'{sec:02d}\""
+
+
+def _weight_date(w: dict) -> str | None:
+    v = w.get("calendarDate")
+    if isinstance(v, str) and v:
+        return v[:10]
+    ts = w.get("timestampGMT") or w.get("date")
+    if isinstance(ts, (int, float)) and ts > 10 ** 11:
+        return datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+    return None
 
 
 def t_get_health(s: Session, day: str | None = None) -> dict:
@@ -1401,6 +1440,9 @@ def t_get_health(s: Session, day: str | None = None) -> dict:
     resp = api_soft(s, f"/gc-api/wellness-service/wellness/daily/respiration/{d}") or {}
     spo2 = api_soft(s, f"/gc-api/wellness-service/wellness/daily/spo2/{d}") or {}
     hrv = api_soft(s, f"/gc-api/hrv-service/hrv/{d}")
+    weight = api_opt(s, "/gc-api/weight-service/weight/latest", date=d, ignorePriority="true") or {}
+    bp = api_opt(s, f"/gc-api/bloodpressure-service/bloodpressure/dayview/{d}") or {}
+    water = api_opt(s, f"/gc-api/usersummary-service/usersummary/hydration/allData/{d}") or {}
     score = {}
     try:
         sd = gql(s, f'query{{sleepScalar(date:"{d}", sleepOnly: false)}}').get("sleepScalar") or {}
@@ -1446,6 +1488,22 @@ def t_get_health(s: Session, day: str | None = None) -> dict:
         "血氧_%": compact({"平均": spo2.get("averageSpo2") or ds.get("averageSpo2"),
                            "最低": spo2.get("lowestSpo2") or ds.get("lowestSpo2")}),
         "HRV": hrv if isinstance(hrv, dict) else None,
+        "体重_kg": compact({
+            "值": round((_pick(weight, "weight") or 0) / 1000.0, 1) if _pick(weight, "weight") else None,
+            "BMI": _pick(weight, "bmi"),
+            "体脂_%": _pick(weight, "bodyFat"),
+            "日期": _weight_date(weight),
+        }) if isinstance(weight, dict) else None,
+        "血压": compact({
+            "收缩": _pick(bp, "systolic", "systolicValue"),
+            "舒张": _pick(bp, "diastolic", "diastolicValue"),
+            "脉搏": _pick(bp, "pulse", "pulseValue"),
+            "分类": _pick(bp, "categoryName", "category"),
+        }) if isinstance(bp, dict) else None,
+        "补水_ml": compact({
+            "已喝": _pick(water, "valueInML", "consumedInML", "totalConsumed"),
+            "目标": _pick(water, "goalInML", "goal"),
+        }) if isinstance(water, dict) else None,
         "强度分钟": compact({"中等": ds.get("moderateIntensityMinutes"),
                              "高强度": ds.get("vigorousIntensityMinutes"),
                              "目标": ds.get("intensityMinutesGoal")}),
@@ -1499,6 +1557,333 @@ def t_get_personal_records(s: Session, sport: str | None = None) -> dict:
             "运动": _type_cn((p.get("activityType") or "").lower()) or sp,
         }))
     return {"数量": len(rows), "个人纪录": rows}
+
+
+def api_opt(s: Session, path: str, **params):
+    """可选数据：接口不存在、参数不对、暂时报错都当作「没有」，不影响主结果。"""
+    try:
+        return api(s, path, **params)
+    except (NotFound, GarminError):
+        return None
+
+
+def _pick(d: dict, *keys, default=None):
+    """按候选键名取第一个非空值（佳明同一个概念常有多种字段名）。"""
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, "", [], {}):
+            return v
+    return default
+
+
+def t_get_calendar(s: Session, month: str | None = None) -> dict:
+    """月历：每天的活动 + 训练/赛事事件。month 形如 2026-11，缺省本月。"""
+    if month and len(month) == 7 and "-" in month:
+        y, m = int(month[:4]), int(month[5:7])
+    else:
+        t = _today()
+        y, m = t.year, t.month
+    dn = _dn(s)
+    cal = api_soft(s, f"/gc-api/calendar-service/year/{y}/month/{m}") or {}
+
+    first = date(y, m, 1)
+    last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    rows = _fetch_range(s, first, last, None)
+
+    days: dict[str, dict] = {}
+    for a in rows:
+        d0 = (a.get("startTimeLocal") or "")[:10]
+        if not d0:
+            continue
+        b = days.setdefault(d0, {"活动": [], "距离_km": 0.0})
+        b["活动"].append({
+            "id": a.get("activityId"),
+            "类型": _type_cn((a.get("activityType") or {}).get("typeKey")),
+            "距离_km": km(a.get("distance")),
+            "配速": pace_str(a.get("averageSpeed")),
+            "心率": num(a.get("averageHR"), 0),
+        })
+        b["距离_km"] = round(b["距离_km"] + float(a.get("distance") or 0) / 1000.0, 2)
+
+    events = []
+    for it in (cal.get("calendarItems") or []):
+        kind = it.get("itemType")
+        events.append(compact({
+            "日期": it.get("date"),
+            "类型": {"nap": "小睡", "activity": "活动", "training": "训练",
+                     "race": "比赛", "weighIn": "称重"}.get(kind, kind),
+            "标题": _pick(it, "title", "courseName", "sportTypeKey"),
+            "时长": hms(it.get("duration")),
+            "距离_km": km(it.get("distance")),
+        }))
+
+    return compact({
+        "月份": f"{y}-{m:02d}",
+        "天数": cal.get("numOfDaysInMonth"),
+        "活动天数": len(days),
+        "月合计_km": round(sum(v["距离_km"] for v in days.values()), 2),
+        "每天": [{"日期": k, **v} for k, v in sorted(days.items())],
+        "事件": events,
+        "说明": None if days or events else "这个月没有活动，也没有训练/赛事安排",
+    })
+
+
+def t_get_training(s: Session, workout_id: str | None = None, limit: int = 10) -> dict:
+    """训练：我的计划 + 训练课程（可指定 id 看详情）+ 近期训练安排。"""
+    dn = _dn(s)
+    plans = api_soft(s, "/gc-api/trainingplan-service/trainingplan/plans?limit=50") or {}
+    plan_rows = []
+    for p in (plans.get("trainingPlanList") or [])[:10]:
+        plan_rows.append(compact({
+            "id": p.get("trainingPlanId"),
+            "名称": p.get("name"),
+            "状态": _pick(p, "trainingStatusKey", "statusKey") or
+                    (p.get("trainingStatus") or {}).get("statusKey"),
+            "周数": p.get("durationInWeeks"),
+            "开始": p.get("startDate"),
+            "结束": p.get("endDate"),
+        }))
+
+    workouts = api_soft(s, "/gc-api/workout-service/workouts",
+                        start=1, limit=max(1, min(int(limit), 50)),
+                        myWorkoutsOnly="true", sharedWorkoutsOnly="false",
+                        includeAtp="false", orderBy="UPDATE_DATE", orderSeq="DESC") or []
+    course_rows = [compact({
+        "id": w.get("workoutId"),
+        "名称": w.get("workoutName"),
+        "运动": (w.get("sportType") or {}).get("sportTypeKey"),
+        "预计时长": hms(w.get("estimatedDurationInSecs")),
+        "预计距离_km": km(w.get("estimatedDistanceInMeters")),
+        "更新": (w.get("updateDate") or "")[:10],
+    }) for w in (workouts or [])[:20]]
+
+    detail = None
+    if workout_id:
+        w = api_soft(s, f"/gc-api/workout-service/workout/{workout_id}")
+        if w:
+            steps = []
+            for st in (w.get("workoutSegments") or []):
+                for step in (st.get("workoutSteps") or []):
+                    steps.append(compact({
+                        "顺序": step.get("stepOrder"),
+                        "类型": step.get("stepType", {}).get("stepTypeKey"),
+                        "结束条件": _pick(step, "endConditionValue", "endCondition"),
+                        "目标": _pick(step, "targetValueOne", "targetValueTwo"),
+                    }))
+            detail = compact({
+                "id": w.get("workoutId"),
+                "名称": w.get("workoutName"),
+                "描述": w.get("description"),
+                "运动": (w.get("sportType") or {}).get("sportTypeKey"),
+                "步骤": steps,
+            })
+
+    today = _today().isoformat()
+    events = api_soft(s, "/gc-api/calendar-service/events",
+                      limit=5, startDate=today, onlyTrainingEvents="true") or []
+    upcoming = [compact({
+        "日期": _pick(e, "date", "startDate"),
+        "名称": _pick(e, "title", "name"),
+        "类型": (e.get("eventType") or {}).get("typeKey") if isinstance(e.get("eventType"), dict) else None,
+    }) for e in (events if isinstance(events, list) else [])[:5]]
+
+    return compact({
+        "我的计划": plan_rows,
+        "我的课程": course_rows,
+        "课程详情": detail,
+        "近期安排": upcoming,
+        "说明": None if (plan_rows or course_rows or upcoming) else "没有进行中的计划或课程",
+    })
+
+
+def t_get_gear(s: Session) -> dict:
+    rows = api_soft(s, "/gc-api/gear-service/gear/v2/list",
+                    start=0, limit=20, gearStatuses="ACTIVE",
+                    sortOrder="firstUseDate_desc") or []
+    types = api_soft(s, "/gc-api/gear-service/gear/v2/user-gear-types") or {}
+    out = []
+    for g in rows if isinstance(rows, list) else []:
+        used = float(g.get("distanceUsedMeters") or 0) / 1000.0
+        cap = float(g.get("maxUsageDistanceMeters") or 0) / 1000.0
+        out.append(compact({
+            "名称": " ".join(x for x in [g.get("brand"), g.get("model")] if x) or g.get("gearType"),
+            "类型": {"SHOES": "跑鞋", "BIKE": "自行车", "OTHER": "其它"}.get(g.get("gearType"), g.get("gearType")),
+            "已用_km": round(used, 1) if used else None,
+            "上限_km": round(cap, 0) if cap else None,
+            "剩余_km": round(cap - used, 0) if cap else None,
+            "使用次数": g.get("numActivitiesLinked"),
+            "启用日期": g.get("firstUseDate"),
+            "状态": g.get("status"),
+        }))
+    return compact({
+        "装备": out,
+        "类型": (types or {}).get("activeGearTypes"),
+        "说明": None if out else "还没有添加装备（跑鞋/自行车）",
+    })
+
+
+def t_get_achievements(s: Session) -> dict:
+    dn = _dn(s)
+    earned = api_soft(s, "/gc-api/badge-service/badge/earned")
+    if not isinstance(earned, list):
+        earned = api_soft(s, f"/gc-api/badge-service/badge/earned/latest/{dn}") or []
+    board = api_opt(s, "/gc-api/badge-service/badge/leaderboard?limit=25") or {}
+    mine = None
+    for c in (board.get("connections") or []):
+        if c.get("displayName") == dn:
+            mine = c
+            break
+    goals = api_opt(s, "/gc-api/goal-service/goal/goals?status=active") or []
+
+    badges = [compact({
+        "名称": b.get("badgeName"),
+        "获得": (b.get("badgeEarnedDate") or "")[:10],
+        "点数": b.get("badgePoints"),
+    }) for b in (earned if isinstance(earned, list) else [])[:20]]
+
+    goal_rows = []
+    for g in (goals if isinstance(goals, list) else [])[:10]:
+        goal_rows.append(compact({
+            "类型": _pick(g, "goalTypeKey", "goalType", "typeKey"),
+            "目标": _pick(g, "targetValue", "goalValue", "value"),
+            "当前": _pick(g, "currentValue", "progressValue"),
+            "开始": _pick(g, "startDate", "startDateLocal"),
+            "结束": _pick(g, "endDate", "endDateLocal"),
+            "状态": _pick(g, "statusKey", "status"),
+        }))
+
+    return compact({
+        "徽章数": len(earned) if isinstance(earned, list) else None,
+        "等级": compact({
+            "等级": (mine or {}).get("userLevel"),
+            "积分": (mine or {}).get("userPoint"),
+        }) if mine else None,
+        "最近徽章": badges,
+        "进行中的目标": goal_rows,
+        "说明": None if badges or goal_rows else "还没有徽章或目标",
+    })
+
+
+def t_get_challenges(s: Session) -> dict:
+    avail = api_soft(s, "/gc-api/badgechallenge-service/badgeChallenge/available?start=1&limit=21") or []
+    progress = api_soft(s, "/gc-api/badgechallenge-service/badgeChallenge/non-completed?desc=true&start=1&limit=50") or []
+    active = api_soft(s, "/gc-api/challenge-service/challenge/active") or {}
+
+    def row(c):
+        return compact({
+            "名称": _pick(c, "badgeChallengeName", "name", "challengeName"),
+            "开始": (_pick(c, "startDate", "startDateLocal") or "")[:10],
+            "结束": (_pick(c, "endDate", "endDateLocal") or "")[:10],
+            "点数": c.get("badgePoints"),
+            "已加入": c.get("userJoined"),
+        })
+
+    return compact({
+        "可参加": [row(c) for c in (avail if isinstance(avail, list) else [])[:10]],
+        "进行中": [row(c) for c in (progress if isinstance(progress, list) else [])[:10]],
+        "我的挑战": [row(c) for c in ((active or {}).get("challengeDTOs") or [])[:10]],
+        "说明": None if (avail or progress) else "暂时没有可参加的挑战",
+    })
+
+
+def t_get_social(s: Session) -> dict:
+    dn = _dn(s)
+    followers = api_soft(s, f"/gc-api/follower-service/follow/followers/{dn}?start=1&limit=11") or []
+    followings = api_soft(s, f"/gc-api/follower-service/follow/followings/{dn}?start=1&limit=11") or []
+    counts = api_opt(s, "/gc-api/follower-service/follow/followings/count") or {}
+    groups = api_soft(s, f"/gc-api/group-service/groups/{dn}?includeMembership=true") or []
+
+    def people(rows):
+        return [compact({
+            "昵称": _pick(r, "fullName", "displayName"),
+            "等级": r.get("userLevel"),
+        }) for r in (rows if isinstance(rows, list) else [])[:10]]
+
+    return compact({
+        "粉丝": people(followers),
+        "关注": people(followings),
+        "关注数": _pick(counts, "followingCount", "count") if isinstance(counts, dict) else None,
+        "群组": [compact({"名称": _pick(g, "groupName", "name"), "人数": _pick(g, "memberCount", "members")})
+                 for g in (groups if isinstance(groups, list) else [])[:10]],
+        "说明": None if (followers or followings or groups) else "还没有关注关系或群组",
+    })
+
+
+def t_get_devices(s: Session) -> dict:
+    rows = api_soft(s, "/gc-api/device-service/deviceregistration/devices") or []
+    out = []
+    for d in (rows if isinstance(rows, list) else []):
+        out.append(compact({
+            "名称": d.get("productDisplayName"),
+            "型号": d.get("productSku"),
+            "固件": d.get("currentFirmwareVersion"),
+            "序列号": d.get("serialNumber"),
+            "主设备": bool(d.get("primary")),
+            "设备ID": d.get("deviceId"),
+            "支持": compact({
+                "光学心率": d.get("hasOpticalHeartRate"),
+                "血氧": d.get("pulseOxAllDayCapable"),
+                "训练状态": d.get("trainingStatusCapable"),
+                "训练准备度": d.get("trainingReadinessCapable"),
+                "HRV": d.get("hrvStatusCapable"),
+                "跑步功率": d.get("runningPowerZonesCapable"),
+            }),
+        }))
+
+    sync = api_opt(s, "/gc-api/wellness-service/wellness/syncTimestamp")
+    if isinstance(sync, dict):
+        sync = sync.get("timestamp")
+    return compact({
+        "设备": out,
+        "最后同步": sync if isinstance(sync, str) else None,
+        "说明": None if out else "没有注册设备",
+    })
+
+
+def t_download_activity(s: Session, activity_id: str, fmt: str = "fit") -> dict:
+    """导出原始文件到 ~/.garmin-mcp/exports/。fmt: fit / gpx / tcx / kml / csv。"""
+    import io
+    import zipfile
+
+    fmt = (fmt or "fit").strip().lower()
+    OUT = HOME / "exports"
+    OUT.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^0-9A-Za-z_-]", "", str(activity_id)) or "activity"
+
+    if fmt in ("fit", "zip", "原始"):
+        r = _request(s, "GET", f"/gc-api/download-service/files/activity/{activity_id}", raw=True)
+        if r.status == 404:
+            raise GarminError(f"活动 {activity_id} 不存在，或该活动没有原始文件")
+        _check(s, r, "下载 FIT")
+        data = r.text if isinstance(r.text, bytes) else str(r.text).encode()
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+            name = next((n for n in zf.namelist() if n.lower().endswith(".fit")), None)
+            if name:
+                data = zf.read(name)
+                path = OUT / f"{safe}.fit"
+            else:
+                path = OUT / f"{safe}.zip"
+        except Exception:
+            path = OUT / f"{safe}.zip"
+    elif fmt in ("gpx", "tcx", "kml", "csv"):
+        r = _request(s, "GET", f"/gc-api/download-service/export/{fmt}/activity/{activity_id}",
+                     raw=True)
+        if r.status == 404:
+            raise GarminError(f"活动 {activity_id} 不存在，或该格式不可用")
+        _check(s, r, f"导出 {fmt.upper()}")
+        data = r.text if isinstance(r.text, bytes) else str(r.text).encode()
+        path = OUT / f"{safe}.{fmt}"
+    else:
+        raise GarminError("fmt 只支持 fit / gpx / tcx / kml / csv")
+
+    path.write_bytes(data)
+    return {
+        "文件": str(path),
+        "格式": path.suffix.lstrip("."),
+        "大小_KB": round(len(data) / 1024.0, 1),
+        "提示": "FIT 含最全的原始数据（开发者字段/气压/温度）；GPX 只有轨迹",
+    }
 
 
 # ==========================================================================
@@ -1819,6 +2204,8 @@ def _guard(fn):
         except AuthRequired as e:
             raise ToolError(
                 f"{e}\n（提示：让用户说一句「登录佳明」，或运行 python3 garmin_mcp.py login）") from e
+        except NotFound as e:
+            raise ToolError(f"该功能在当前站点不可用或数据不存在：{e}") from e
         except GarminError as e:
             raise ToolError(f"Garmin 接口错误：{e}") from e
     return wrapper
@@ -1833,9 +2220,12 @@ def build_server():
         instructions=(
             "Garmin Connect（佳明）跑步与健康数据分析。先用 list_activities 找活动 id，"
             "再用 get_activity 取单次详情；长期趋势用 get_training_status / get_period_stats；"
-            "睡眠、静息心率、HRV 用 get_health；PB 用 get_personal_records。"
+            "睡眠、静息心率、HRV、体重血压用 get_health；PB 用 get_personal_records；"
+            "月历用 get_calendar；课表与计划用 get_training；装备/徽章/挑战/好友分别用"
+            " get_gear / get_achievements / get_challenges / get_social；设备用 get_devices；"
+            "原始文件用 download_activity。"
             "单位已统一为 公里/秒/配速字符串，气温为摄氏度。"
-            "若返回未登录，调用 login 工具（会弹浏览器窗口让用户登录）。"
+            "若返回未登录，调用 login 工具（会先弹网页选国区/国际版，再开登录窗口）。"
         ),
     )
 
@@ -1895,6 +2285,57 @@ def build_server():
     @_guard
     def get_personal_records(sport: str | None = None) -> str:
         return _out(t_get_personal_records(ensure_session(), sport))
+
+    @mcp.tool(description=(
+        "月历视图：指定月份（YYYY-MM，缺省本月）里每天的活动（类型/距离/配速/心率）"
+        "以及训练、赛事、小睡等日程事件。"))
+    @_guard
+    def get_calendar(month: str | None = None) -> str:
+        return _out(t_get_calendar(ensure_session(), month))
+
+    @mcp.tool(description=(
+        "训练计划与课程：我的训练计划、我的训练课程（最近若干节）、近期训练安排；"
+        "传 workout_id 可看某节课的步骤详情。"))
+    @_guard
+    def get_training(workout_id: str | None = None, limit: int = 10) -> str:
+        return _out(t_get_training(ensure_session(), workout_id, limit))
+
+    @mcp.tool(description=(
+        "装备（跑鞋/自行车）：名称、已用里程、里程上限与剩余、使用次数、启用日期。"
+        "问「这双鞋跑了多少公里/该换鞋了吗」时用。"))
+    @_guard
+    def get_gear() -> str:
+        return _out(t_get_gear(ensure_session()))
+
+    @mcp.tool(description=(
+        "成就：徽章（最近获得的）、等级与积分、进行中的目标。"))
+    @_guard
+    def get_achievements() -> str:
+        return _out(t_get_achievements(ensure_session()))
+
+    @mcp.tool(description="挑战：可参加的徽章挑战、进行中的挑战、我加入的挑战。")
+    @_guard
+    def get_challenges() -> str:
+        return _out(t_get_challenges(ensure_session()))
+
+    @mcp.tool(description="社交：粉丝、关注、关注数、我加入的群组。")
+    @_guard
+    def get_social() -> str:
+        return _out(t_get_social(ensure_session()))
+
+    @mcp.tool(description=(
+        "设备详情：已注册设备、型号、固件版本、序列号、是否主设备，以及设备能力"
+        "（光学心率/血氧/训练状态/训练准备度/HRV/跑步功率）和最后同步时间。"))
+    @_guard
+    def get_devices() -> str:
+        return _out(t_get_devices(ensure_session()))
+
+    @mcp.tool(description=(
+        "导出某次活动的原始文件到本机（默认 fit，可选 gpx/tcx/kml/csv），返回文件路径。"
+        "用户要「导出 GPX / 下载原始数据 / 发给别人」时用。"))
+    @_guard
+    def download_activity(activity_id: str, fmt: str = "fit") -> str:
+        return _out(t_download_activity(ensure_session(), activity_id, fmt))
 
     @mcp.tool(name="render_chart", description=(
         "把数据画成图，直接以图片返回（不需要任何外部工具）。"
@@ -2003,6 +2444,14 @@ def main(argv: list[str] | None = None) -> int:
                 "get_training_status": t_get_training_status,
                 "get_health": t_get_health,
                 "get_personal_records": t_get_personal_records,
+                "get_calendar": t_get_calendar,
+                "get_training": t_get_training,
+                "get_gear": t_get_gear,
+                "get_achievements": t_get_achievements,
+                "get_challenges": t_get_challenges,
+                "get_social": t_get_social,
+                "get_devices": t_get_devices,
+                "download_activity": t_download_activity,
             }.get(tool)
             if not fn:
                 print(f"未知工具: {tool}")

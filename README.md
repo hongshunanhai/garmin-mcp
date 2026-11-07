@@ -26,7 +26,14 @@ AI：（调用 get_period_stats + list_activities）上周 3 次共 17.8 km，�
 | 我这周是不是练过量了 | `get_training_status` |
 | 我昨晚睡得怎么样、静息心率多少 | `get_health` |
 | 我的 5K/半马 PB 是多少 | `get_personal_records` |
-| 我的 VO2max、心率区间、都有什么设备 | `get_profile` |
+| 我这个月哪几天跑了 | `get_calendar` |
+| 我这双鞋跑了多少公里、该换了吗 | `get_gear` |
+| 我下周的课表是什么 | `get_training` |
+| 我都有什么设备、固件多少 | `get_devices` |
+| 我有哪些徽章、目标进度如何 | `get_achievements` |
+| 有什么挑战可以参加 | `get_challenges` |
+| 把这次活动的 GPX 导出来 | `download_activity` |
+| 我的 VO2max、心率区间 | `get_profile` |
 
 图表是服务端直接生成的 PNG，跑友不需要装浏览器自动化之类的东西。
 
@@ -161,19 +168,44 @@ python3 garmin_mcp.py login
 
 ---
 
-## 提供的工具（9 个，全部只读）
+## 提供的工具（17 个，全部只读）
+
+**核心数据**
 
 | 工具 | 作用 |
 |---|---|
 | `list_activities` | 活动列表，可按日期 / 运动类型 / 关键字过滤 |
 | `get_activity` | 单次活动详情：总览、每公里分段、心率区间、天气，可选逐点序列 |
-| `render_chart` | 生成图表：单次活动的配速+心率图 / 近 N 周跑量柱状图 |
-| `get_period_stats` | 周 / 月 / 年 / 全年 / 自定义区间汇总 |
-| `get_training_status` | 训练状态、ACWR、负荷平衡、VO2max、准备程度、HRV |
-| `get_health` | 某天的步数、心率、睡眠分期、压力、身体电量、呼吸、血氧 |
+| `get_period_stats` | 周 / 月 / 年 / 全年 / 自定义区间汇总 + 分期明细 |
+| `get_calendar` | 月历：每天的活动 + 训练/赛事日程 |
+| `get_training_status` | 训练状态、ACWR、三档负荷平衡、VO2max、准备程度、HRV、成绩预测、乳酸阈 |
+| `get_health` | 某天：步数、心率、睡眠分期与分数、压力、身体电量、呼吸、血氧、HRV、体重、血压、补水 |
 | `get_personal_records` | 1K~全马、最长跑步、游泳、力量训练的 PB |
-| `get_profile` | 昵称、身高体重、VO2max、心率区间、生涯总计、设备 |
-| `login` | 打开登录窗口（用户说「登录佳明」时调用） |
+| `get_profile` | 昵称、身高体重、VO2max、心率区间、生涯总计、分项统计 |
+
+**训练与装备**
+
+| 工具 | 作用 |
+|---|---|
+| `get_training` | 我的训练计划、训练课程列表；传 `workout_id` 看课表步骤 |
+| `get_gear` | 跑鞋/自行车：已用里程、里程上限与剩余、使用次数 |
+| `get_devices` | 设备型号、固件、序列号、能力（血氧/训练准备度/HRV…）、最后同步 |
+
+**社交与成就**
+
+| 工具 | 作用 |
+|---|---|
+| `get_achievements` | 徽章、等级积分、进行中的目标 |
+| `get_challenges` | 可参加的挑战、进行中的挑战 |
+| `get_social` | 粉丝、关注、群组 |
+
+**其它**
+
+| 工具 | 作用 |
+|---|---|
+| `render_chart` | 生成图表：单次活动的配速+心率图 / 近 N 周跑量柱状图 |
+| `download_activity` | 导出原始文件（fit / gpx / tcx / kml / csv）到本机，返回路径 |
+| `login` | 选站点 + 打开登录窗口（用户说「登录佳明」时调用） |
 
 明确**没有**封装：上传 FIT、删除活动、改标题、发评论等一切写操作。
 

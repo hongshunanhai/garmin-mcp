@@ -177,6 +177,67 @@ def test_picker():
         G.webbrowser.open = saved_open
 
 
+def test_weight_date():
+    print("体重日期解析")
+    check("字符串日期", G._weight_date({"calendarDate": "2026-11-05T00:00:00"}) == "2026-11-05")
+    # 取 UTC 正午，避免时区把日期推到前后一天
+    check("epoch 毫秒", G._weight_date({"timestampGMT": 1793870400000}) == "2026-11-05",
+          G._weight_date({"timestampGMT": 1793870400000}))
+    check("都没有返回 None", G._weight_date({}) is None)
+
+
+def test_download():
+    print("导出原始文件")
+    import io
+    import zipfile
+    import tempfile
+    from pathlib import Path as _P
+
+    class FakeResp:
+        def __init__(self, status, data):
+            self.status = status
+            self.text = data
+            self.set_cookies = []
+            self.content_type = ""
+
+    # 构造一个含 FIT 的 zip
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("123_ACTIVITY.fit", b"FITDATA")
+    zipped = buf.getvalue()
+
+    old_req, old_home, old_check = G._request, G.HOME, G._check
+    tmp = _P(tempfile.mkdtemp())
+    try:
+        G.HOME = tmp
+
+        def fake_req(s, method, path, **kw):
+            if "files/activity" in path:
+                return FakeResp(200, zipped)
+            return FakeResp(200, b"<gpx/>")
+
+        G._request = fake_req
+        G._check = lambda s, r, what="": r
+
+        out = G.t_download_activity(None, "123", "fit")
+        p = _P(out["文件"])
+        check("FIT 从 zip 里解出来", p.suffix == ".fit" and p.read_bytes() == b"FITDATA", out)
+        check("返回大小", out["大小_KB"] >= 0)
+
+        out2 = G.t_download_activity(None, "123", "gpx")
+        p2 = _P(out2["文件"])
+        check("GPX 直接落盘", p2.suffix == ".gpx" and p2.read_bytes() == b"<gpx/>")
+
+        raised = False
+        try:
+            G.t_download_activity(None, "123", "pdf")
+        except G.GarminError:
+            raised = True
+        check("不支持的格式报错", raised)
+    finally:
+        G._request, G.HOME, G._check = old_req, old_home, old_check
+
+
 def test_pr_labels():
     print("个人纪录标签")
     check("5K 有时间型", 3 in G.PR_TIME_TYPES)
@@ -186,7 +247,8 @@ def test_pr_labels():
 
 if __name__ == "__main__":
     for fn in (test_pace, test_sport, test_period, test_cookie_parse,
-               test_csrf, test_session, test_compact, test_picker, test_pr_labels):
+               test_csrf, test_session, test_compact, test_picker,
+               test_weight_date, test_download, test_pr_labels):
         fn()
     print()
     if FAILS:

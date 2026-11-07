@@ -13,6 +13,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 EXPECTED = {
     "get_profile", "list_activities", "get_activity", "get_period_stats",
     "get_training_status", "get_health", "get_personal_records",
+    "get_calendar", "get_training", "get_gear", "get_achievements",
+    "get_challenges", "get_social", "get_devices", "download_activity",
     "login", "render_chart",
 }
 

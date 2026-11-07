@@ -110,10 +110,16 @@ and SSO host differ:
 | SSO | `sso.garmin.cn` | `sso.garmin.com` |
 | Command | `login` | `login --site=global` |
 
-## Tools (9, all read-only)
+## Tools (17, all read-only)
 
-`list_activities` · `get_activity` · `render_chart` · `get_period_stats` ·
-`get_training_status` · `get_health` · `get_personal_records` · `get_profile` · `login`
+**Core** — `list_activities` · `get_activity` · `get_period_stats` · `get_calendar` ·
+`get_training_status` · `get_health` · `get_personal_records` · `get_profile`
+
+**Training & gear** — `get_training` (plans + workouts) · `get_gear` · `get_devices`
+
+**Social & awards** — `get_achievements` · `get_challenges` · `get_social`
+
+**Other** — `render_chart` · `download_activity` (fit/gpx/tcx/kml/csv) · `login`
 
 No write endpoints are exposed (no upload, delete, rename, comment).
 

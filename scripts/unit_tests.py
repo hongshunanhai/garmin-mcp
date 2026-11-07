@@ -311,6 +311,39 @@ def test_editor_roundtrip():
     check("时长还原成分钟", s2["duration_min"] == 10, s2)
 
 
+def test_editor_flow():
+    print("编辑器流程")
+    import json as _json
+    import threading as _th
+    import time as _t
+    import urllib.request
+    from pathlib import Path as _P
+
+    old_open = G.webbrowser.open
+    old_create = G._editor_create
+    G.webbrowser.open = lambda *a, **k: True
+    G._editor_create = lambda session, body: {"workout_id": 123, "url": "https://x/app/workout/123"}
+    try:
+        payload = G.build_workout("t", [{"type": "warmup", "duration_min": 5}])
+        box = {}
+        th = _th.Thread(target=lambda: box.setdefault("r", G.open_workout_editor(
+            "t", [{"type": "warmup", "duration_min": 5}], timeout=15)))
+        th.start()
+        for _ in range(50):
+            if G._LAST_PICKER_URL:
+                break
+            _t.sleep(0.1)
+        # 编辑器端口藏在函数内部，改用预览返回的 editor_url 不可得；
+        # 这里直接验证：不点任何东西时超时返回 pending
+        th.join(timeout=20)
+        r = box.get("r") or {}
+        check("超时返回 pending 而不是抛错", r.get("pending") is True, r)
+        check("pending 时带 editor_url", bool(r.get("editor_url")), r)
+    finally:
+        G.webbrowser.open = old_open
+        G._editor_create = old_create
+
+
 def test_write_gate():
     print("写操作开关")
     import os as _os
@@ -561,7 +594,7 @@ if __name__ == "__main__":
     for fn in (test_pace, test_sport, test_period, test_cookie_parse,
                test_csrf, test_session, test_compact, test_picker,
                test_weight_date, test_download, test_workout_builder,
-               test_editor_roundtrip, test_write_gate, test_session_permissions,
+               test_editor_roundtrip, test_editor_flow, test_write_gate, test_session_permissions,
                test_bootstrap_fallback, test_refresh_lock, test_temperature,
                test_pr_sport, test_http_status_mapping, test_probe_result,
                test_rows_truncated, test_login_budget,

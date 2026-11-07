@@ -2362,16 +2362,23 @@ def open_workout_editor(name: str, steps: list, sport: str = "run",
     except Exception:
         print("   浏览器没有自动打开，请手动访问上面的地址", file=sys.stderr)
 
+    def _close_later(seconds: float):
+        t = threading.Timer(seconds, httpd.shutdown)
+        t.daemon = True
+        t.start()
+
     state.done.wait(timeout)
-    httpd.shutdown()
     if state.phase == "created":
         s = load_session()
         base = s.base if s else "https://connect.garmin.cn"
+        _close_later(180)            # 页面还能继续排期/下发 3 分钟
         return {"ok": True, "created": True, "workout_id": state.workout_id,
                 "url": f"{base}/app/workout/{state.workout_id}",
                 "message": "课表已创建，可在页面里继续排期/发送到设备"}
     if state.phase == "cancelled":
+        httpd.shutdown()
         return {"ok": False, "cancelled": True, "message": "用户取消了创建"}
+    _close_later(300)                # 超时也留着页面，用户还能慢慢改
     return {"ok": False, "pending": True, "editor_url": url,
             "预览": _workout_summary(payload),
             "message": f"编辑器已打开（{url}），等你确认；超时未操作"}

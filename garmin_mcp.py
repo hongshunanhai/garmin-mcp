@@ -1755,6 +1755,413 @@ def _workout_summary(payload: dict) -> list:
     return out
 
 
+
+# --------------------------------------------------------------------------
+# 课表编辑器：把佳明的「创建训练」流程做成一个本地页面，用户自己确认/调整
+# --------------------------------------------------------------------------
+WORKOUT_EDITOR_HTML = r"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>创建训练 · Garmin</title>
+<style>
+:root{--bg:#fbfbfd;--fg:#1d1d1f;--mute:#6e6e73;--line:#e3e3e8;--card:#fff;--code:#f4f5f7;
+ --warm:#d9534f;--run:#1f6fd0;--cool:#2e9e4f;--rec:#8e8e93;--accent:#007cc3}
+@media (prefers-color-scheme:dark){:root{--bg:#111114;--fg:#e8e8ed;--mute:#9a9aa2;--line:#2a2a30;--card:#1a1a1f;--code:#1c1c21;--accent:#4aa3d8}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"PingFang SC",system-ui,sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:22px 32px;border-bottom:1px solid var(--line)}
+.logo{width:38px;height:38px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+header h1{margin:0;font-size:20px}
+header .sub{color:var(--mute);font-size:13px;margin-left:auto}
+.wrap{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:0;max-width:1200px;margin:0 auto}
+main{padding:24px 32px 80px}
+aside{border-left:1px solid var(--line);padding:24px 26px;position:sticky;top:0;height:100vh;overflow:auto}
+.step{display:flex;gap:0;border:1px solid var(--line);border-radius:12px;background:var(--card);margin-bottom:10px;overflow:hidden}
+.bar{width:6px;flex:0 0 6px}
+.bar.warmup{background:var(--warm)}.bar.interval{background:var(--run)}
+.bar.cooldown{background:var(--cool)}.bar.recovery,.bar.rest{background:var(--rec)}
+.body{flex:1;padding:12px 16px}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.row + .row{margin-top:8px}
+label.f{font-size:12px;color:var(--mute);display:flex;flex-direction:column;gap:2px}
+input,select{border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:8px;
+ padding:6px 9px;font:inherit;font-size:14px}
+input[type=number]{width:92px}
+input.pace{width:74px;text-align:center}
+select{width:120px}
+.del{margin-left:auto;border:none;background:transparent;color:var(--mute);cursor:pointer;font-size:18px}
+.del:hover{color:#d03e3e}
+.repeat{border:1px dashed var(--accent);border-radius:12px;padding:12px;margin-bottom:10px}
+.repeat .hd{display:flex;align-items:center;gap:10px;color:var(--accent);font-weight:600;font-size:14px}
+.repeat .kids{margin:10px 0 0 14px;border-left:2px solid var(--line);padding-left:14px}
+.addbar{display:flex;gap:10px;margin-top:16px}
+button{border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:10px;
+ padding:9px 14px;font:inherit;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;width:100%}
+button.primary:disabled{opacity:.5;cursor:default}
+button.ghost{width:100%;margin-top:8px}
+.stat{background:var(--code);border-radius:12px;padding:14px 16px;margin:14px 0}
+.stat .k{color:var(--mute);font-size:12px}
+.stat .v{font-size:24px;font-weight:700;margin-top:2px}
+.hint{color:var(--mute);font-size:12.5px;line-height:1.6}
+.result{margin-top:14px;font-size:14px}
+.ok{color:#1f9d3d}.err{color:#d03e3e}
+a{color:var(--accent)}
+</style></head><body>
+<header><div class="logo">G</div><h1 id="hname">创建训练</h1>
+<div class="sub">确认后写入你的 Garmin Connect 账号</div></header>
+<div class="wrap">
+  <main><div id="steps"></div>
+    <div class="addbar">
+      <button onclick="addStep('interval')">+ 添加步骤</button>
+      <button onclick="addRepeat()">+ 添加重复组</button>
+    </div>
+  </main>
+  <aside>
+    <label class="f" style="margin-bottom:10px">训练名称
+      <input id="name" style="width:100%;margin-top:4px">
+    </label>
+    <div class="stat"><div class="k">总距离</div><div class="v" id="dist">–</div>
+      <div class="k" style="margin-top:10px">预计时长</div><div class="v" id="time">–</div></div>
+    <button class="primary" id="create" onclick="create()">创建到佳明</button>
+    <button class="ghost" onclick="cancel()">取消</button>
+    <div class="result" id="result"></div>
+    <div class="hint" style="margin-top:16px">
+      创建后会出现在佳明「训练课程」里。<br>
+      之后可以排到日历并「发送到设备」，手表下次同步就会收到。
+    </div>
+  </aside>
+</div>
+<script>
+const S = __INITIAL__;
+const NAMES = {warmup:"热身", interval:"跑步", recovery:"慢跑恢复", cooldown:"缓和", rest:"休息"};
+const COLORS = {warmup:"warmup", interval:"interval", recovery:"recovery", cooldown:"cooldown", rest:"rest"};
+const el = id => document.getElementById(id);
+
+function paceSec(t){ if(!t) return 0; const p=String(t).replace(/["']/g,':').split(':');
+  return (parseInt(p[0])||0)*60 + (parseInt(p[1])||0); }
+function fmtPace(sec){ const m=Math.floor(sec/60), s=Math.round(sec%60); return m+"'"+(s<10?"0":"")+s+'"'; }
+
+function stepCard(step, path){
+  const d=document.createElement('div'); d.className='step';
+  const bar=document.createElement('div'); bar.className='bar '+(COLORS[step.type]||'interval'); d.appendChild(bar);
+  const body=document.createElement('div'); body.className='body';
+  const r1=document.createElement('div'); r1.className='row';
+  const sel=document.createElement('select');
+  for(const k of ['warmup','interval','recovery','cooldown']){
+    const o=document.createElement('option'); o.value=k; o.textContent=NAMES[k];
+    if(k===step.type) o.selected=true; sel.appendChild(o);
+  }
+  sel.onchange=()=>{ step.type=sel.value; render(); };
+  r1.appendChild(sel);
+
+  const dist=document.createElement('label'); dist.className='f'; dist.textContent='距离（公里）';
+  const di=document.createElement('input'); di.type='number'; di.step='0.1'; di.min='0';
+  di.value = step.distance_km || ''; di.placeholder='如 1.5';
+  di.oninput=()=>{ step.distance_km = parseFloat(di.value)||0; step.duration_min=0; updateTotals(); };
+  dist.appendChild(di); r1.appendChild(dist);
+
+  const or=document.createElement('span'); or.className='hint'; or.textContent='或'; r1.appendChild(or);
+
+  const dur=document.createElement('label'); dur.className='f'; dur.textContent='时长（分钟）';
+  const du=document.createElement('input'); du.type='number'; du.step='1'; du.min='0';
+  du.value = step.duration_min || ''; du.placeholder='如 10';
+  du.oninput=()=>{ step.duration_min = parseFloat(du.value)||0; step.distance_km=0; updateTotals(); };
+  dur.appendChild(du); r1.appendChild(dur);
+
+  const del=document.createElement('button'); del.className='del'; del.textContent='✕';
+  del.onclick=()=>{ removeAt(path); }; r1.appendChild(del);
+  body.appendChild(r1);
+
+  const r2=document.createElement('div'); r2.className='row';
+  const tag=document.createElement('label'); tag.className='f'; tag.textContent='配速（分:秒 / 公里）';
+  const tw=document.createElement('div'); tw.className='row';
+  const fast=document.createElement('input'); fast.className='pace'; fast.value=(step.pace&&step.pace[0])||''; fast.placeholder='5:00';
+  const dash=document.createElement('span'); dash.textContent='–';
+  const slow=document.createElement('input'); slow.className='pace'; slow.value=(step.pace&&step.pace[1])||''; slow.placeholder='5:30';
+  const sync=()=>{ step.pace=[fast.value||'', slow.value||'']; updateTotals(); };
+  fast.oninput=sync; slow.oninput=sync;
+  tw.appendChild(fast); tw.appendChild(dash); tw.appendChild(slow);
+  tag.appendChild(tw); r2.appendChild(tag);
+  body.appendChild(r2);
+
+  d.appendChild(body);
+  return d;
+}
+
+function repeatCard(rep, path){
+  const box=document.createElement('div'); box.className='repeat';
+  const hd=document.createElement('div'); hd.className='hd';
+  hd.textContent='重复组 × ';
+  const n=document.createElement('input'); n.type='number'; n.min='1'; n.max='20'; n.value=rep.times||1; n.style.width='64px';
+  n.oninput=()=>{ rep.times=parseInt(n.value)||1; updateTotals(); };
+  hd.appendChild(n); hd.appendChild(document.createTextNode(' 次'));
+  const del=document.createElement('button'); del.className='del'; del.textContent='✕';
+  del.onclick=()=>removeAt(path); hd.appendChild(del);
+  box.appendChild(hd);
+
+  const kids=document.createElement('div'); kids.className='kids';
+  (rep.steps||[]).forEach((ch,i)=> kids.appendChild(stepCard(ch, path.concat(['steps',i]))));
+  const add=document.createElement('button'); add.textContent='+ 组内步骤';
+  add.onclick=()=>{ rep.steps=rep.steps||[]; rep.steps.push({type:'recovery',distance_km:1,pace:['8:00','8:30']}); render(); };
+  kids.appendChild(add);
+  box.appendChild(kids);
+  return box;
+}
+
+function removeAt(path){
+  let obj=S, key=null;
+  for(let i=0;i<path.length-1;i++){ obj = obj[path[i]]; }
+  key = path[path.length-1];
+  if(Array.isArray(obj)) obj.splice(key,1); else delete obj[key];
+  render();
+}
+
+function addStep(type){
+  S.steps.push({type:type, distance_km:1, pace:['6:00','6:30']});
+  render();
+}
+function addRepeat(){
+  S.steps.push({type:'repeat', times:3, steps:[
+    {type:'interval', distance_km:1, pace:['5:00','5:30']},
+    {type:'recovery', distance_km:1, pace:['7:30','8:00']}]});
+  render();
+}
+
+function midPaceSec(step){
+  const a=paceSec((step.pace||[])[0]), b=paceSec((step.pace||[])[1]);
+  if(a&&b) return (a+b)/2;
+  return a||b||330;
+}
+
+function totals(){
+  let dist=0, sec=0;
+  const walk=(arr, mult)=>{
+    for(const st of arr){
+      if(st.type==='repeat'){ walk(st.steps||[], mult*(st.times||1)); continue; }
+      const km=parseFloat(st.distance_km)||0, min=parseFloat(st.duration_min)||0;
+      if(km){ dist += km*mult; sec += km*midPaceSec(st)*mult; }
+      else if(min){ sec += min*60*mult; }
+    }
+  };
+  walk(S.steps,1);
+  return {dist, sec};
+}
+function updateTotals(){
+  const t=totals();
+  el('dist').textContent = t.dist ? t.dist.toFixed(2)+' km' : '–';
+  el('time').textContent = t.sec ? Math.floor(t.sec/3600)+':'+String(Math.floor(t.sec%3600/60)).padStart(2,'0')+':'+String(Math.round(t.sec%60)).padStart(2,'0') : '–';
+}
+
+function render(){
+  el('hname').textContent = S.name || '创建训练';
+  el('name').value = S.name || '';
+  const box=el('steps'); box.innerHTML='';
+  S.steps.forEach((st,i)=>{
+    box.appendChild(st.type==='repeat' ? repeatCard(st,[i]) : stepCard(st,[i]));
+  });
+  updateTotals();
+}
+el('name').oninput = e => { S.name = e.target.value; el('hname').textContent = S.name; };
+
+function wire(step){
+  if(step.type==='repeat') return {type:'repeat', times:step.times||1, steps:(step.steps||[]).map(wire)};
+  const o={type:step.type};
+  const km=parseFloat(step.distance_km)||0, min=parseFloat(step.duration_min)||0;
+  if(km) o.distance_m = Math.round(km*1000); else if(min) o.duration_min = min;
+  if(step.pace && step.pace[0] && step.pace[1]) o.pace_range = [step.pace[1], step.pace[0]];
+  return o;
+}
+
+async function post(url, body){
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
+  return [r.status, await r.json().catch(()=>({}))];
+}
+
+async function create(){
+  const btn=el('create'); btn.disabled=true; btn.textContent='创建中…';
+  const steps = S.steps.map(wire);
+  const [code, res] = await post('/api/create', {name:S.name, steps:steps});
+  if(code===200 && res.ok){
+    el('result').innerHTML = '<div class="ok">✅ 已创建（id '+res.workout_id+'）</div>'+
+      '<div style="margin-top:10px"><a href="'+res.url+'" target="_blank">在 Garmin 打开这节训练 →</a></div>'+
+      '<div style="margin-top:14px" class="hint">要不要顺便排期？</div>'+
+      '<div class="row" style="margin-top:6px"><input type="date" id="day"><button onclick="sched('+res.workout_id+')">排到这天</button></div>'+
+      '<button class="ghost" onclick="push()">发送到设备</button>'+
+      '<div id="sub" style="margin-top:8px"></div>';
+    btn.textContent='已创建'; btn.disabled=true;
+  } else {
+    el('result').innerHTML = '<div class="err">❌ '+(res.message||'创建失败')+'</div>';
+    btn.disabled=false; btn.textContent='重试创建';
+  }
+}
+async function sched(id){
+  const day=el('day').value; if(!day){ el('sub').innerHTML='<span class="err">先选日期</span>'; return; }
+  const [code,res]=await post('/api/schedule',{workout_id:id, day:day});
+  el('sub').innerHTML = code===200&&res.ok ? '<span class="ok">✅ 已排到 '+day+'</span>' : '<span class="err">❌ '+(res.message||'排期失败')+'</span>';
+}
+async function push(){
+  const [code,res]=await post('/api/push',{});
+  const box=el('sub'); if(!box) return;
+  box.innerHTML = code===200&&res.ok ? '<span class="ok">✅ 已发送到设备，手表下次同步会收到</span>' : '<span class="err">❌ '+(res.message||'发送失败')+'</span>';
+}
+async function cancel(){ await post('/api/cancel',{}); document.body.innerHTML='<div style="padding:60px;text-align:center;font-size:16px">已取消，这个页面可以关掉了</div>'; }
+render();
+</script></body></html>"""
+
+
+@dataclass
+class _EditorState:
+    phase: str = "edit"          # edit -> created / cancelled
+    workout_id: str | None = None
+    message: str = ""
+    done: threading.Event = field(default_factory=threading.Event)
+
+
+def _editor_json(state: _EditorState, **extra) -> str:
+    d = {"ok": state.phase != "error", "phase": state.phase,
+         "workout_id": state.workout_id, "message": state.message}
+    d.update(extra)
+    return json.dumps(d, ensure_ascii=False)
+
+
+def _editor_create(session: Session, body: dict) -> dict:
+    name = (body.get("name") or "").strip() or "训练课程"
+    steps = body.get("steps") or []
+    payload = build_workout(name, steps, body.get("sport") or "run")
+    s = ensure_session(interactive=False)
+    r = _check(s, _request(s, "POST", "/gc-api/workout-service/workout",
+                           body=json.dumps(payload).encode(),
+                           headers={"Content-Type": "application/json"}), "创建课表")
+    data = r.json() if r.text.strip() else {}
+    wid = data.get("workoutId") or (data.get("workout") or {}).get("workoutId")
+    return {"workout_id": wid, "url": f"{s.base}/app/workout/{wid}"}
+
+
+def _start_editor(payload: dict) -> tuple[ThreadingHTTPServer, _EditorState, str]:
+    state = _EditorState()
+    initial = json.dumps({
+        "name": payload.get("workoutName") or "训练课程",
+        "description": payload.get("description"),
+        "steps": _payload_to_steps(payload),
+    }, ensure_ascii=False)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code: int, ctype: str, body: str):
+            data = body.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except Exception:
+                pass
+
+        def do_GET(self):
+            if self.path.startswith("/api/state"):
+                self._send(200, "application/json", _editor_json(state))
+            else:
+                self._send(200, "text/html; charset=utf-8",
+                           WORKOUT_EDITOR_HTML.replace("__INITIAL__", initial))
+
+        def do_POST(self):
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                body = {}
+            try:
+                if self.path.startswith("/api/create"):
+                    res = _editor_create(None, body)
+                    state.phase, state.workout_id = "created", res["workout_id"]
+                    self._send(200, "application/json", _editor_json(state, **res))
+                elif self.path.startswith("/api/schedule"):
+                    wid, day = body.get("workout_id"), body.get("day")
+                    s = ensure_session(interactive=False)
+                    _check(s, _request(s, "POST", f"/gc-api/workout-service/schedule/{wid}",
+                                       body=json.dumps({"calendarDate": day}).encode(),
+                                       headers={"Content-Type": "application/json"}), "排期")
+                    self._send(200, "application/json", _editor_json(state, ok=True))
+                elif self.path.startswith("/api/push"):
+                    s = ensure_session(interactive=False)
+                    _check(s, _request(s, "PUT", "/gc-api/workout-service/schedule/sendtodevices",
+                                       body=b"", headers={"Content-Type": "application/json"}), "发送")
+                    self._send(200, "application/json", _editor_json(state, ok=True))
+                elif self.path.startswith("/api/cancel"):
+                    state.phase = "cancelled"
+                    state.done.set()
+                    self._send(200, "application/json", _editor_json(state))
+                else:
+                    self._send(404, "text/plain", "not found")
+            except AuthRequired as e:
+                self._send(401, "application/json", json.dumps({"ok": False, "message": str(e)}, ensure_ascii=False))
+            except (GarminError, NotFound) as e:
+                state.phase = "edit"
+                state.message = str(e)
+                self._send(400, "application/json", json.dumps({"ok": False, "message": str(e)}, ensure_ascii=False))
+    httpd = ThreadingHTTPServer(("127.0.0.1", _free_port()), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, state, f"http://127.0.0.1:{httpd.server_port}/"
+
+
+def _payload_to_steps(payload: dict) -> list:
+    """把编译后的课表还原成编辑器用的结构（km / 分:秒）。"""
+    def pace_txt(v):
+        if not v:
+            return ""
+        sec = 1000.0 / v
+        return f"{int(sec) // 60}:{int(sec) % 60:02d}"
+
+    def conv(step):
+        if step.get("type") == "RepeatGroupDTO":
+            return {"type": "repeat", "times": step.get("numberOfIterations") or 1,
+                    "steps": [conv(c) for c in step.get("workoutSteps") or []]}
+        ck = (step.get("endCondition") or {}).get("conditionTypeKey")
+        v = step.get("endConditionValue") or 0
+        out = {"type": (step.get("stepType") or {}).get("stepTypeKey") or "interval"}
+        if ck == "distance":
+            out["distance_km"] = round(v / 1000.0, 2)
+        else:
+            out["duration_min"] = round(v / 60.0, 1)
+        if (step.get("targetType") or {}).get("workoutTargetTypeKey") == "pace.zone":
+            out["pace"] = [pace_txt(step.get("targetValueTwo")), pace_txt(step.get("targetValueOne"))]
+        return out
+
+    return [conv(s) for s in payload["workoutSegments"][0]["workoutSteps"]]
+
+
+def open_workout_editor(name: str, steps: list, sport: str = "run",
+                        description: str | None = None,
+                        timeout: float = 240.0) -> dict:
+    """弹本地编辑器页面，用户在页面上确认/调整/创建。返回创建结果或预览。"""
+    payload = build_workout(name, steps, sport, description)
+    httpd, state, url = _start_editor(payload)
+    print(f"🌐 已打开课表编辑器：{url}", file=sys.stderr)
+    try:
+        webbrowser.open(url, new=1, autoraise=True)
+    except Exception:
+        print("   浏览器没有自动打开，请手动访问上面的地址", file=sys.stderr)
+
+    state.done.wait(timeout)
+    httpd.shutdown()
+    if state.phase == "created":
+        s = load_session()
+        base = s.base if s else "https://connect.garmin.cn"
+        return {"ok": True, "created": True, "workout_id": state.workout_id,
+                "url": f"{base}/app/workout/{state.workout_id}",
+                "message": "课表已创建，可在页面里继续排期/发送到设备"}
+    if state.phase == "cancelled":
+        return {"ok": False, "cancelled": True, "message": "用户取消了创建"}
+    return {"ok": False, "pending": True, "editor_url": url,
+            "预览": _workout_summary(payload),
+            "message": f"编辑器已打开（{url}），等你确认；超时未操作"}
+
+
 def t_create_workout(s: Session, name: str, steps: list, sport: str = "run",
                      description: str | None = None, confirm: bool = False) -> dict:
     payload = build_workout(name, steps, sport, description)
@@ -2573,7 +2980,9 @@ def build_server():
         return _out(t_download_activity(ensure_session(), activity_id, fmt))
 
     @mcp.tool(description=(
-        "【写操作，需 GARMIN_ALLOW_WRITE=1】创建跑步/骑行/游泳课表（对应网页「训练课程 → 创建训练」）。"
+        "创建跑步/骑行/游泳课表（对应网页「训练课程 → 创建训练」）。"
+        "默认会弹出一个本地页面：把课表按佳明的样式（热身/跑步/恢复/缓和 + 重复组）画出来，"
+        "用户可以改距离/配速/组数，点「创建到佳明」后才真正写入，并可当场排期、发送到设备。"
         "steps 是结构化步骤数组，例如："
         '[{"type":"warmup","duration_min":10},'
         ' {"type":"repeat","times":4,"steps":[{"type":"interval","distance_m":800,"pace":"5:00"},'
@@ -2585,7 +2994,9 @@ def build_server():
     @_guard
     def create_workout(name: str, steps: list, sport: str = "run",
                        description: str | None = None, confirm: bool = False) -> str:
-        # 预览不需要登录；只有真正提交时才要会话
+        # 默认：打开可视化编辑器（把佳明的创建流程摆给用户看），用户在页面上确认/调整/创建
+        if not confirm and os.environ.get("GARMIN_WORKOUT_EDITOR", "1") != "0":
+            return _out(open_workout_editor(name, steps, sport, description))
         return _out(t_create_workout(ensure_session() if confirm else load_session(),
                                      name, steps, sport, description, confirm))
 
@@ -2734,6 +3145,13 @@ def main(argv: list[str] | None = None) -> int:
             if not fn:
                 print(f"未知工具: {tool}")
                 return 1
+            if tool == "create_workout" and not args.get("confirm") \
+                    and os.environ.get("GARMIN_WORKOUT_EDITOR", "1") != "0":
+                print(json.dumps(compact(open_workout_editor(
+                    args.get("name") or "训练课程", args.get("steps") or [],
+                    args.get("sport") or "run", args.get("description"))),
+                    ensure_ascii=False, indent=1))
+                return 0
             write_tools = {"create_workout", "schedule_workout",
                            "push_workout_to_device", "delete_workout"}
             if tool in write_tools and not args.get("confirm"):

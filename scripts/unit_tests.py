@@ -281,6 +281,29 @@ def test_workout_builder():
         check(f"{name} 报错", raised)
 
 
+def test_editor_roundtrip():
+    print("编辑器结构还原")
+    w = G.build_workout("t", [
+        {"type": "warmup", "distance_m": 1500, "pace_range": ["8:00", "7:30"]},
+        {"type": "repeat", "times": 3, "steps": [
+            {"type": "interval", "distance_m": 1000, "pace_range": ["5:30", "5:00"]},
+            {"type": "recovery", "distance_m": 1000, "pace_range": ["8:00", "7:30"]},
+        ]},
+    ])
+    steps = G._payload_to_steps(w)
+    check("两步（热身+重复）", len(steps) == 2, steps)
+    check("热身距离还原成公里", steps[0]["distance_km"] == 1.5, steps[0])
+    check("配速还原成 快-慢", steps[0]["pace"] == ["7:30", "8:00"], steps[0].get("pace"))
+    rep = steps[1]
+    check("重复次数", rep["times"] == 3)
+    check("组内两步", len(rep["steps"]) == 2)
+    check("间歇配速", rep["steps"][0]["pace"] == ["5:00", "5:30"], rep["steps"][0].get("pace"))
+    # 时长型步骤
+    w2 = G.build_workout("t2", [{"type": "warmup", "duration_min": 10}])
+    s2 = G._payload_to_steps(w2)[0]
+    check("时长还原成分钟", s2["duration_min"] == 10, s2)
+
+
 def test_write_gate():
     print("写操作开关")
     import os as _os
@@ -316,7 +339,7 @@ if __name__ == "__main__":
     for fn in (test_pace, test_sport, test_period, test_cookie_parse,
                test_csrf, test_session, test_compact, test_picker,
                test_weight_date, test_download, test_workout_builder,
-               test_write_gate, test_pr_labels):
+               test_editor_roundtrip, test_write_gate, test_pr_labels):
         fn()
     print()
     if FAILS:

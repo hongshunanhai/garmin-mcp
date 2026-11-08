@@ -87,6 +87,18 @@ SPORT_PARENT = {
     "running": 1, "cycling": 2, "hiking": 3, "walking": 9,
     "swimming": 26, "strength_training": 13, "multi_sport": 89,
 }
+# 佳明的子类型 typeKey 命名不统一（trail_running / treadmill_running / virtual_run ...），
+# 且 parentTypeId 并不稳定：中国区户外跑是 17、跑步机是 1。仅靠精确相等或
+# parentTypeId 单条件会漏记，因此按运动家族词根做兜底匹配。
+SPORT_TYPEKEY_ROOTS = {
+    "running": ("running", "run"),
+    "cycling": ("cycling", "biking", "bike"),
+    "hiking": ("hiking", "hike"),
+    "walking": ("walking", "walk"),
+    "swimming": ("swimming", "swim"),
+    "strength_training": ("strength_training", "strength"),
+    "multi_sport": ("multi_sport", "multisport"),
+}
 SPORT_ALIAS = {
     "run": "running", "跑步": "running",
     "ride": "cycling", "bike": "cycling", "骑行": "cycling",
@@ -1080,6 +1092,15 @@ def _sport_key(sport: str | None) -> str | None:
     return None if k == "all" else k
 
 
+def _typekey_matches(sport_key: str, type_key: str | None) -> bool:
+    """typeKey 是否属于某个运动家族（含 trail_running / virtual_run 等子类型）。"""
+    if not type_key:
+        return False
+    if type_key == sport_key:
+        return True
+    return any(root in type_key for root in SPORT_TYPEKEY_ROOTS.get(sport_key, ()))
+
+
 def _type_cn(key: str | None) -> str:
     return ACTIVITY_TYPE_CN.get(key or "", key or "未知")
 
@@ -1359,7 +1380,7 @@ def _fetch_range(s: Session, start: date, end: date, sport: str | None = None) -
     if t:
         parent = SPORT_PARENT.get(t, 0)
         rows = [r for r in rows
-                if (r.get("activityType") or {}).get("typeKey") == t
+                if _typekey_matches(t, (r.get("activityType") or {}).get("typeKey"))
                 or (r.get("activityType") or {}).get("parentTypeId") == parent]
     return rows
 

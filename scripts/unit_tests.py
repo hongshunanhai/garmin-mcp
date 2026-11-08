@@ -679,6 +679,44 @@ def test_rows_truncated():
         G.api, G._dn = old_api, old_dn
 
 
+def test_sport_typekey_family():
+    """回归：中国区户外跑 parentTypeId=17、跑步机=1，子类型 typeKey 五花八门。
+
+    旧逻辑只认 `typeKey == "running" or parentTypeId == 1`，遇到
+    trail_running / virtual_run 这类 parentTypeId=17 的子类型会整条漏掉。
+    """
+    print("运动类型子类型过滤（户外跑 parentTypeId=17）")
+    check("running 命中", G._typekey_matches("running", "running"))
+    check("treadmill_running 命中", G._typekey_matches("running", "treadmill_running"))
+    check("trail_running 命中", G._typekey_matches("running", "trail_running"))
+    check("virtual_run 命中", G._typekey_matches("running", "virtual_run"))
+    check("cycling 不误收", not G._typekey_matches("running", "road_biking"))
+    check("空 typeKey 安全", not G._typekey_matches("running", None))
+
+    rows = [
+        {"activityId": 1, "activityType": {"typeKey": "running", "parentTypeId": 17}},
+        {"activityId": 2, "activityType": {"typeKey": "treadmill_running", "parentTypeId": 1}},
+        {"activityId": 3, "activityType": {"typeKey": "trail_running", "parentTypeId": 17}},
+        {"activityId": 4, "activityType": {"typeKey": "virtual_run", "parentTypeId": 17}},
+        {"activityId": 5, "activityType": {"typeKey": "cycling", "parentTypeId": 2}},
+    ]
+    old_api, old_dn = G.api, G._dn
+    try:
+        G._dn = lambda s: "guid"
+        G.api = lambda *a, **k: {"activityList": rows}
+        span = (__import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 12, 31))
+        got = G._fetch_range(G.Session(site="cn"), *span, "run")
+        check("run 收齐 4 类跑步且不收骑行", [r["activityId"] for r in got] == [1, 2, 3, 4],
+              [r["activityId"] for r in got])
+        got2 = G._fetch_range(G.Session(site="cn"), *span, "ride")
+        check("ride 不误收跑步", [r["activityId"] for r in got2] == [5],
+              [r["activityId"] for r in got2])
+        got3 = G._fetch_range(G.Session(site="cn"), *span, "all")
+        check("all 不过滤", len(got3) == 5, len(got3))
+    finally:
+        G.api, G._dn = old_api, old_dn
+
+
 def test_login_budget():
     print("登录预算")
     check("站点选择默认 120s", G._pick_site.__defaults__[0] == 120.0, G._pick_site.__defaults__)
@@ -701,7 +739,7 @@ if __name__ == "__main__":
                test_write_gate, test_session_permissions,
                test_bootstrap_fallback, test_refresh_lock, test_temperature,
                test_pr_sport, test_http_status_mapping, test_probe_result,
-               test_rows_truncated, test_login_budget,
+               test_rows_truncated, test_sport_typekey_family, test_login_budget,
                test_pr_labels):
         fn()
     print()
